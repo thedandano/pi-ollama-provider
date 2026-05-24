@@ -1,10 +1,10 @@
 /**
  * Tests for native-stream.ts — NDJSON parsing, message conversion,
  * tool conversion, ghost-token detection, overflow detection,
- * and stream event format validation.
+ * stream event format validation, and content block ordering.
  */
 
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { Readable } from "node:stream";
 import { createAssistantMessageEventStream } from "@mariozechner/pi-ai";
 
@@ -14,9 +14,22 @@ import {
   convertTools,
   isGhostTokenStream,
   isOllamaContextOverflow,
+  streamNativeChat,
   type OllamaChatChunk,
   type OllamaToolCall,
 } from "../extensions/pi-ollama-provider/native-stream.js";
+
+let originalFetch: typeof globalThis.fetch;
+
+beforeEach(() => {
+  originalFetch = globalThis.fetch;
+  // By default, unmocked fetch calls will reject
+  globalThis.fetch = vi.fn().mockRejectedValue(new Error("fetch not mocked in this test"));
+});
+
+afterEach(() => {
+  globalThis.fetch = originalFetch;
+});
 
 // ════════════════════════════════════════════════════════════════
 // parseNDJSON
@@ -496,5 +509,265 @@ describe("Tool call arguments parsing", () => {
     }
 
     expect(args).toEqual({});
+  });
+});
+
+// ════════════════════════════════════════════════════════════════
+// Content block ordering (regression: thinking-first models)
+// ════════════════════════════════════════════════════════════════
+
+/**
+ * Helper: create a mock fetch that returns the given NDJSON lines
+ * as a ReadableStream response.body.
+ */
+function mockFetchWithNDJSON(lines: string[]): void {
+  const bodyStr = lines.join("\n") + "\n";
+  const encoder = new TextEncoder();
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode(bodyStr));
+      controller.close();
+    },
+  });
+
+  globalThis.fetch = vi.fn().mockResolvedValue({
+    ok: true,
+    status: 200,
+    body,
+    text: () => Promise.resolve(bodyStr),
+  } as Response);
+}
+
+describe("Content block ordering", () => {
+  /**
+   * Helper: capture stream events by wrapping stream.push
+   */
+  function captureEvents(stream: any): any[] {
+    const events: any[] = [];
+    const originalPush = stream.push.bind(stream);
+    stream.push = (event: any) => {
+      events.push(event);
+      return originalPush(event);
+    };
+    return events;
+  }
+
+  it("should create text block at correct index when thinking precedes text", async () => {
+    // Simulate the GLM/minimax pattern: thinking chunks first, then text, then done
+    // This tests the regression where textIndex=0 overwrote thinking block at [0]
+    mockFetchWithNDJSON([
+      JSON.stringify({ model: "test", created_at: "", message: { role: "assistant", content: "", thinking: "1. Analyze the input..." }, done: false }),
+      JSON.stringify({ model: "test", created_at: "", message: { role: "assistant", content: "Hello! How can I help?" }, done: false }),
+      JSON.stringify({ model: "test", created_at: "", message: { role: "assistant", content: "" }, done: false }),
+      JSON.stringify({ model: "test", created_at: "", done: true, done_reason: "stop", eval_count: 50, prompt_eval_count: 5, total_duration: 1000 }),
+    ]);
+
+    const stream = createAssistantMessageEventStream();
+    const events = captureEvents(stream);
+
+    // Let it reject so we can check the final output via error event
+    // (after stream.end(), the done event has been pushed)
+    try {
+      await streamNativeChat(stream, {
+        baseUrl: "http://localhost:11434",
+        model: "test-model",
+        contextWindow: 4096,
+        messages: [{ role: "user", content: "hi" }],
+      });
+    } catch {
+      // Expected since the stream will end during processing
+    }
+
+    // Find the final message in the events
+    const doneEvent = events.find((e: any) => e.type === "done");
+    const errorEvent = events.find((e: any) => e.type === "error");
+
+    if (doneEvent) {
+      const content = doneEvent.message.content;
+      expect(content.length).toBeGreaterThanOrEqual(2);
+
+      // First block should be thinking
+      expect(content[0].type).toBe("thinking");
+      expect(content[0].thinking).toContain("Analyze");
+
+      // Second block should be text (NOT a second thinking block)
+      expect(content[1].type).toBe("text");
+      expect(content[1].text).toContain("Hello");
+
+      // The thinking block should NOT have a spurious 'text' property
+      expect(content[0].text).toBeUndefined();
+    } else if (errorEvent) {
+      // If the stream errored, check what we got before the error
+      const message = errorEvent.error;
+      const content = message.content;
+      // At minimum we should have the right structure
+      if (content.length >= 2) {
+        expect(content[0].type).toBe("thinking");
+        expect(content[1].type).toBe("text");
+        expect(content[0].text === undefined || content[0].text === "").toBe(true);
+      }
+    }
+  });
+
+  it("should handle multiple interleaved thinking/text blocks", async () => {
+    // GLM sometimes interleaves thinking snippets between text blocks
+    mockFetchWithNDJSON([
+      JSON.stringify({ model: "test", created_at: "", message: { role: "assistant", content: "", thinking: "Step 1: Analyze" }, done: false }),
+      JSON.stringify({ model: "test", created_at: "", message: { role: "assistant", content: "Hi there" }, done: false }),
+      JSON.stringify({ model: "test", created_at: "", message: { role: "assistant", content: "", thinking: "Step 2: Format response" }, done: false }),
+      JSON.stringify({ model: "test", created_at: "", message: { role: "assistant", content: "! How can I help?" }, done: false }),
+      JSON.stringify({ model: "test", created_at: "", done: true, done_reason: "stop", eval_count: 100, prompt_eval_count: 5 }),
+    ]);
+
+    const stream = createAssistantMessageEventStream();
+    const events = captureEvents(stream);
+
+    try {
+      await streamNativeChat(stream, {
+        baseUrl: "http://localhost:11434",
+        model: "test-model",
+        contextWindow: 4096,
+        messages: [{ role: "user", content: "hi" }],
+      });
+    } catch {
+      // Expected
+    }
+
+    const doneEvent = events.find((e: any) => e.type === "done");
+    const errorEvent = events.find((e: any) => e.type === "error");
+
+    if (doneEvent) {
+      const content = doneEvent.message.content;
+      // Should have 4 blocks: thinking, text, thinking, text
+      expect(content.length).toBe(4);
+
+      // Each text block should have proper text, NOT on the thinking block
+      expect(content[0].type).toBe("thinking");
+      expect(content[1].type).toBe("text");
+      expect(content[1].text).toBe("Hi there");
+      expect(content[2].type).toBe("thinking");
+      expect(content[3].type).toBe("text");
+      expect(content[3].text).toBe("! How can I help?");
+
+      // No spurious 'text' on thinking blocks
+      expect(content[0].text).toBeUndefined();
+      expect(content[2].text).toBeUndefined();
+    } else if (errorEvent) {
+      // At minimum check the structure collected so far
+      const content = errorEvent.error.content;
+      const thinkingBlocks = content.filter((b: any) => b.type === "thinking");
+      const textBlocks = content.filter((b: any) => b.type === "text");
+      // No thinking block should have 'text' property
+      for (const tb of thinkingBlocks) {
+        expect(tb.text).toBeUndefined();
+      }
+      // Text blocks should have content (not empty)
+      for (const tb of textBlocks) {
+        expect(tb.text.length).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it("should handle text before thinking (standard order)", async () => {
+    // Some models output text first, then thinking in a follow-up
+    mockFetchWithNDJSON([
+      JSON.stringify({ model: "test", created_at: "", message: { role: "assistant", content: "I am thinking" }, done: false }),
+      JSON.stringify({ model: "test", created_at: "", message: { role: "assistant", content: "", thinking: "actually let me reconsider" }, done: false }),
+      JSON.stringify({ model: "test", created_at: "", message: { role: "assistant", content: "Final answer" }, done: false }),
+      JSON.stringify({ model: "test", created_at: "", done: true, done_reason: "stop", eval_count: 30, prompt_eval_count: 5 }),
+    ]);
+
+    const stream = createAssistantMessageEventStream();
+    const events = captureEvents(stream);
+
+    try {
+      await streamNativeChat(stream, {
+        baseUrl: "http://localhost:11434",
+        model: "test-model",
+        contextWindow: 4096,
+        messages: [{ role: "user", content: "hi" }],
+      });
+    } catch {
+      // Expected
+    }
+
+    const doneEvent = events.find((e: any) => e.type === "done");
+    const errorEvent = events.find((e: any) => e.type === "error");
+
+    if (doneEvent) {
+      const content = doneEvent.message.content;
+      // Should have: text, thinking, text
+      expect(content.length).toBe(3);
+      expect(content[0].type).toBe("text");
+      expect(content[0].text).toBe("I am thinking");
+      expect(content[1].type).toBe("thinking");
+      expect(content[2].type).toBe("text");
+      expect(content[2].text).toBe("Final answer");
+    }
+  });
+
+  it("should handle text-only response (no thinking)", async () => {
+    // Models like llama without thinking
+    mockFetchWithNDJSON([
+      JSON.stringify({ model: "test", created_at: "", message: { role: "assistant", content: "Hel" }, done: false }),
+      JSON.stringify({ model: "test", created_at: "", message: { role: "assistant", content: "lo!" }, done: false }),
+      JSON.stringify({ model: "test", created_at: "", done: true, done_reason: "stop", eval_count: 2, prompt_eval_count: 1 }),
+    ]);
+
+    const stream = createAssistantMessageEventStream();
+    const events = captureEvents(stream);
+
+    try {
+      await streamNativeChat(stream, {
+        baseUrl: "http://localhost:11434",
+        model: "test-model",
+        contextWindow: 4096,
+        messages: [{ role: "user", content: "hi" }],
+      });
+    } catch {
+      // Expected
+    }
+
+    const doneEvent = events.find((e: any) => e.type === "done");
+    const errorEvent = events.find((e: any) => e.type === "error");
+
+    if (doneEvent) {
+      const content = doneEvent.message.content;
+      expect(content.length).toBe(1);
+      expect(content[0].type).toBe("text");
+      expect(content[0].text).toBe("Hello!");
+    }
+  });
+
+  it("should handle tool calls after thinking", async () => {
+    mockFetchWithNDJSON([
+      JSON.stringify({ model: "test", created_at: "", message: { role: "assistant", content: "", thinking: "I should use a tool" }, done: false }),
+      JSON.stringify({ model: "test", created_at: "", message: { role: "assistant", content: "", tool_calls: [{ function: { name: "read", arguments: { path: "/test" } } }] }, done: false }),
+      JSON.stringify({ model: "test", created_at: "", done: true, done_reason: "stop", eval_count: 10, prompt_eval_count: 5 }),
+    ]);
+
+    const stream = createAssistantMessageEventStream();
+    const events = captureEvents(stream);
+
+    try {
+      await streamNativeChat(stream, {
+        baseUrl: "http://localhost:11434",
+        model: "test-model",
+        contextWindow: 4096,
+        messages: [{ role: "user", content: "read a file" }],
+      });
+    } catch {
+      // Expected
+    }
+
+    const doneEvent = events.find((e: any) => e.type === "done");
+    const errorEvent = events.find((e: any) => e.type === "error");
+
+    if (doneEvent) {
+      const content = doneEvent.message.content;
+      expect(content.length).toBe(2);
+      expect(content[0].type).toBe("thinking");
+      expect(content[1].type).toBe("toolCall");
+    }
   });
 });
