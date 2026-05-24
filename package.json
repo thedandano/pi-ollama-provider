@@ -14,7 +14,7 @@
   "main": "extensions/pi-ollama-provider/index.ts",
   "pi": {
     "extensions": [
-      "./extensions"
+      "./extensions/pi-ollama-provider/index.ts"
     ],
     "skills": [],
     "prompts": [],
