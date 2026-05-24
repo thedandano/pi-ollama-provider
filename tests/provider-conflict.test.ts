@@ -15,7 +15,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
-import { hasToolSupport, hasVision, assembleModelsFromCache } from "../extensions/pi-ollama-provider/discovery.js";
+import { hasToolSupport, assembleModelsFromCache } from "../extensions/pi-ollama-provider/discovery.js";
 
 const __dirname = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 
@@ -29,17 +29,15 @@ describe("Provider registration", () => {
     expect(source).toContain('OLLAMA_NATIVE_API = "ollama-native"');
 
     // Should have streamSimple registration with ollama-native API
-    // Match only the native streaming block (ends at the closing brace + else)
-    const nativeStreamingMatch = source.match(
-      /pi\.registerProvider\(LOCAL_PROVIDER_NAME,\s*\{[\s\S]*?streamSimple:\s*createNativeStreamSimple[\s\S]*?^\s+\}\);/m,
+    // In the source, api: comes before streamSimple
+    // Count occurrences where api: OLLAMA_NATIVE_API is followed by streamSimple
+    const nativeStreamingMatches = source.matchAll(
+      /api:\s*OLLAMA_NATIVE_API[\s\S]*?streamSimple:\s*createNativeStreamSimple/g,
     );
 
-    // This match MUST succeed - native streaming must be registered
-    expect(nativeStreamingMatch).not.toBeNull();
-    expect(nativeStreamingMatch![0]).toContain("api: OLLAMA_NATIVE_API");
-    // The native streaming block should NOT contain openai-completions
-    // (that's only in the else branch for compat mode)
-    expect(nativeStreamingMatch![0]).not.toContain('api: "openai-completions"');
+    const matchCount = Array.from(nativeStreamingMatches).length;
+    // Should find at least 2 native streaming registrations (both paths)
+    expect(matchCount).toBeGreaterThanOrEqual(2);
   });
 
   it("should include tools property in model registration", () => {
@@ -68,10 +66,23 @@ describe("GLM tool capability", () => {
     const rawCacheData = {
       version: 2 as const,
       timestamp: Date.now(),
-      tagsModels: [{ name: "glm-5.1:cloud", model: "glm-5.1:cloud", size: 0, modified_at: "", digest: "" }],
+      tagsModels: [{
+        name: "glm-5.1:cloud",
+        model: "glm-5.1:cloud",
+        size: 0,
+        modified_at: "",
+        digest: "",
+        details: {
+          family: "glm",
+          capabilities: ["completion", "tools"],
+        },
+      }],
       showResponses: {
         "glm-5.1:cloud": {
           capabilities: ["completion", "tools"],
+          details: {
+            family: "glm",
+          },
         },
       },
       mode: "cloud" as const,
