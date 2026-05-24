@@ -179,6 +179,24 @@ describe("convertMessages", () => {
     expect(result[0].tool_call_id).toBe("call_123");
   });
 
+  it("converts pi-style toolResult role to Ollama tool role", () => {
+    // pi's AgentLoop sends tool results with role: "toolResult"
+    // but the Ollama API expects role: "tool"
+    const messages = [
+      {
+        role: "toolResult",
+        toolCallId: "tool_0",
+        toolName: "bash",
+        content: [{ type: "text", text: "file1.txt\nfile2.txt" }],
+        isError: false,
+      },
+    ];
+    const result = convertMessages(messages);
+    expect(result[0].role).toBe("tool");
+    expect(result[0].tool_call_id).toBe("tool_0");
+    expect(result[0].content).toContain("file1.txt");
+  });
+
   it("preserves assistant tool_calls", () => {
     const toolCalls: OllamaToolCall[] = [
       { function: { name: "read_file", arguments: { path: "/foo" } } },

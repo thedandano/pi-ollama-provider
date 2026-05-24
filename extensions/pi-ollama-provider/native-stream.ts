@@ -204,8 +204,8 @@ export function convertMessages(
       : undefined;
 
     // Handle tool results
-    if (role === "tool" || role === "ipython") {
-      const toolCallId = String(msg.tool_call_id ?? "");
+    if (role === "tool" || role === "toolResult" || role === "ipython") {
+      const toolCallId = String(msg.tool_call_id ?? msg.toolCallId ?? "");
       const resultContent = typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content);
       return {
         role: "tool" as const,
