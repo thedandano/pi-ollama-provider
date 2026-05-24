@@ -184,25 +184,41 @@ async function registerLocalProvider(pi: ExtensionAPI, settings: OllamaSettings)
     tools: m.toolSupport,
   }));
 
-  // Register with our custom API name to avoid overwriting other providers
-  // The apiProviderRegistry is keyed by API string, so we use "ollama-native"
-  // instead of "openai-completions" to prevent conflicts with openrouter, azure, etc.
   pi.unregisterProvider(LOCAL_PROVIDER_NAME);
-  pi.registerProvider(LOCAL_PROVIDER_NAME, {
-    baseUrl: `${config.mode === "cloud" ? config.baseUrl : baseUrl}/v1`,
-    api: OLLAMA_NATIVE_API,
-    apiKey: config.apiKey,
-    compat: {
-      supportsDeveloperRole: false,
-      supportsReasoningEffort: false,
-    },
-    models: piModels,
-    streamSimple: createNativeStreamSimple(
-      config.mode === "cloud" ? config.baseUrl : baseUrl,
-      config.apiKey,
-      settings,
-    ),
-  });
+
+  // Use native streaming or openai-compat based on settings
+  // Native uses custom API ("ollama-native") to avoid overwriting other providers
+  // that use "openai-completions" (openrouter, azure)
+  if (settings.streamingMode !== "openai-compat") {
+    // Native streaming mode - uses custom API + streamSimple
+    pi.registerProvider(LOCAL_PROVIDER_NAME, {
+      baseUrl: `${config.mode === "cloud" ? config.baseUrl : baseUrl}/v1`,
+      api: OLLAMA_NATIVE_API,
+      apiKey: config.apiKey,
+      compat: {
+        supportsDeveloperRole: false,
+        supportsReasoningEffort: false,
+      },
+      models: piModels,
+      streamSimple: createNativeStreamSimple(
+        config.mode === "cloud" ? config.baseUrl : baseUrl,
+        config.apiKey,
+        settings,
+      ),
+    });
+  } else {
+    // OpenAI compat mode (fallback for old Ollama or user preference)
+    pi.registerProvider(LOCAL_PROVIDER_NAME, {
+      baseUrl: `${config.mode === "cloud" ? config.baseUrl : baseUrl}/v1`,
+      api: "openai-completions",
+      apiKey: config.apiKey,
+      compat: {
+        supportsDeveloperRole: false,
+        supportsReasoningEffort: false,
+      },
+      models: piModels,
+    });
+  }
 
   // Update cache for instant next startup (raw API data)
   writeModelCache(result.rawCacheData);
@@ -240,26 +256,40 @@ function registerFromCache(pi: ExtensionAPI): boolean {
 
   pi.unregisterProvider(LOCAL_PROVIDER_NAME);
 
-  // Register with our custom API name to avoid overwriting other providers
-  // The apiProviderRegistry is keyed by API string, so we use "ollama-native"
-  // instead of "openai-completions" to prevent conflicts with openrouter, azure, etc.
-  pi.registerProvider(LOCAL_PROVIDER_NAME, {
-    baseUrl: `${currentConfig.baseUrl}/v1`,
-    api: OLLAMA_NATIVE_API,
-    apiKey: currentConfig.apiKey,
-    compat: {
-      supportsDeveloperRole: false,
-      supportsReasoningEffort: false,
-    },
-    models: piModels,
-    streamSimple: createNativeStreamSimple(
-      currentConfig.mode === "cloud"
-        ? currentConfig.baseUrl
-        : getOllamaHost(),
-      currentConfig.apiKey,
-      settings,
-    ),
-  });
+  // Use native streaming or openai-compat based on settings
+  // Native uses custom API ("ollama-native") to avoid overwriting other providers
+  if (settings.streamingMode !== "openai-compat") {
+    // Native streaming mode - uses custom API + streamSimple
+    pi.registerProvider(LOCAL_PROVIDER_NAME, {
+      baseUrl: `${currentConfig.baseUrl}/v1`,
+      api: OLLAMA_NATIVE_API,
+      apiKey: currentConfig.apiKey,
+      compat: {
+        supportsDeveloperRole: false,
+        supportsReasoningEffort: false,
+      },
+      models: piModels,
+      streamSimple: createNativeStreamSimple(
+        currentConfig.mode === "cloud"
+          ? currentConfig.baseUrl
+          : getOllamaHost(),
+        currentConfig.apiKey,
+        settings,
+      ),
+    });
+  } else {
+    // OpenAI compat mode (fallback for old Ollama or user preference)
+    pi.registerProvider(LOCAL_PROVIDER_NAME, {
+      baseUrl: `${currentConfig.baseUrl}/v1`,
+      api: "openai-completions",
+      apiKey: currentConfig.apiKey,
+      compat: {
+        supportsDeveloperRole: false,
+        supportsReasoningEffort: false,
+      },
+      models: piModels,
+    });
+  }
 
   console.log(`[ollama] ${modelConfigs.length} models from cache (v${cached.version}, ${Math.round((Date.now() - cached.timestamp) / 3600000)}h old)`);
   return true;
