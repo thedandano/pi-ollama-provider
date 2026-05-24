@@ -3,7 +3,12 @@
  *
  * Discovers models from local Ollama or ollama.com cloud and registers
  * them via pi.registerProvider(). Uses native /api/chat streaming
- * (Option C hybrid) with fallback to OpenAI compat for old Ollama versions.
+ * with a custom API name to avoid conflicts with other providers.
+ *
+ * IMPORTANT: We use api: "ollama-native" instead of "openai-completions" to avoid
+ * overwriting the openai-completions API provider that openrouter and others use.
+ * The apiProviderRegistry in pi is keyed by API string, so using a unique API name
+ * prevents our streamSimple from overwriting other providers.
  *
  * Key improvements over simple openai-compat approach:
  * - Native /api/chat streaming fixes tool-calling bug (ollama#12557)
@@ -76,6 +81,11 @@ export type { SearchResult, FetchResult, ApiKeyResolver } from "./cloud.js";
 
 const LOCAL_PROVIDER_NAME = "ollama";
 const CLOUD_PROVIDER_NAME = "ollama-cloud";
+
+// Custom API name to avoid conflicting with openai-completions
+// The apiProviderRegistry is keyed by API string, so we need a unique name
+// that won't overwrite openrouter, azure, etc.
+const OLLAMA_NATIVE_API = "ollama-native";
 
 let currentConfig: OllamaConfig = resolveConfig();
 let localModelNames = new Set<string>();
@@ -162,7 +172,7 @@ async function registerLocalProvider(pi: ExtensionAPI, settings: OllamaSettings)
   // (by default, register all models — user can filter in pi's model picker)
   const modelConfigs = result.localModels;
 
-  // Build pi-compatible model list
+  // Build pi-compatible model list with our custom API
   const piModels = modelConfigs.map((m) => ({
     id: m.id,
     name: m.name,
@@ -171,14 +181,19 @@ async function registerLocalProvider(pi: ExtensionAPI, settings: OllamaSettings)
     contextWindow: m.contextWindow,
     maxTokens: m.maxTokens,
     cost: m.cost,
+    tools: m.toolSupport,
   }));
 
+  pi.unregisterProvider(LOCAL_PROVIDER_NAME);
+
   // Use native streaming or openai-compat based on settings
-  if (settings.streamingMode === "native") {
-    pi.unregisterProvider(LOCAL_PROVIDER_NAME);
+  // Native uses custom API ("ollama-native") to avoid overwriting other providers
+  // that use "openai-completions" (openrouter, azure)
+  if (settings.streamingMode !== "openai-compat") {
+    // Native streaming mode - uses custom API + streamSimple
     pi.registerProvider(LOCAL_PROVIDER_NAME, {
       baseUrl: `${config.mode === "cloud" ? config.baseUrl : baseUrl}/v1`,
-      api: "openai-completions",
+      api: OLLAMA_NATIVE_API,
       apiKey: config.apiKey,
       compat: {
         supportsDeveloperRole: false,
@@ -193,7 +208,6 @@ async function registerLocalProvider(pi: ExtensionAPI, settings: OllamaSettings)
     });
   } else {
     // OpenAI compat mode (fallback for old Ollama or user preference)
-    pi.unregisterProvider(LOCAL_PROVIDER_NAME);
     pi.registerProvider(LOCAL_PROVIDER_NAME, {
       baseUrl: `${config.mode === "cloud" ? config.baseUrl : baseUrl}/v1`,
       api: "openai-completions",
@@ -237,14 +251,18 @@ function registerFromCache(pi: ExtensionAPI): boolean {
     contextWindow: m.contextWindow,
     maxTokens: m.maxTokens,
     cost: m.cost,
+    tools: m.toolSupport,
   }));
 
   pi.unregisterProvider(LOCAL_PROVIDER_NAME);
 
-  if (settings.streamingMode === "native") {
+  // Use native streaming or openai-compat based on settings
+  // Native uses custom API ("ollama-native") to avoid overwriting other providers
+  if (settings.streamingMode !== "openai-compat") {
+    // Native streaming mode - uses custom API + streamSimple
     pi.registerProvider(LOCAL_PROVIDER_NAME, {
       baseUrl: `${currentConfig.baseUrl}/v1`,
-      api: "openai-completions",
+      api: OLLAMA_NATIVE_API,
       apiKey: currentConfig.apiKey,
       compat: {
         supportsDeveloperRole: false,
@@ -260,6 +278,7 @@ function registerFromCache(pi: ExtensionAPI): boolean {
       ),
     });
   } else {
+    // OpenAI compat mode (fallback for old Ollama or user preference)
     pi.registerProvider(LOCAL_PROVIDER_NAME, {
       baseUrl: `${currentConfig.baseUrl}/v1`,
       api: "openai-completions",

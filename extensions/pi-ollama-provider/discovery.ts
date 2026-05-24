@@ -145,6 +145,7 @@ const TOOL_CAPABLE_FAMILIES = new Set([
   "firefunction",
   "deepseek-v4",
   "deepseek-v3",
+  "glm", // GLM 5.1+ supports tools
 ]);
 
 /** Model families that support vision */
