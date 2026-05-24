@@ -374,8 +374,6 @@ export async function streamNativeChat(
   };
 
   // Track content indices for proper delta ordering
-  let textIndex = 0;
-  let thinkingIndex = 0;
   let toolCallIndex = 0;
   let hasToolCalls = false;
 
@@ -445,10 +443,10 @@ export async function streamNativeChat(
 
           // Start text block if not already active
           if (!activeTextBlock) {
-            activeTextBlock = { index: textIndex, content: "" };
+            const idx = output.content.length;
+            activeTextBlock = { index: idx, content: "" };
             output.content.push({ type: "text", text: "" });
-            stream.push({ type: "text_start", contentIndex: textIndex, partial: output });
-            textIndex++;
+            stream.push({ type: "text_start", contentIndex: idx, partial: output });
           }
 
           // Accumulate and emit delta
@@ -467,10 +465,10 @@ export async function streamNativeChat(
 
           // Start thinking block if not already active
           if (!activeThinkingBlock) {
-            activeThinkingBlock = { index: thinkingIndex, content: "" };
+            const idx = output.content.length;
+            activeThinkingBlock = { index: idx, content: "" };
             output.content.push({ type: "thinking", thinking: "" });
-            stream.push({ type: "thinking_start", contentIndex: thinkingIndex, partial: output });
-            thinkingIndex++;
+            stream.push({ type: "thinking_start", contentIndex: idx, partial: output });
           }
 
           // Accumulate and emit delta
@@ -502,6 +500,7 @@ export async function streamNativeChat(
               }
             }
 
+            const toolCallIdx = output.content.length;
             const toolCallBlock = {
               type: "toolCall",
               id: `tool_${toolCallIndex}`,
@@ -509,12 +508,12 @@ export async function streamNativeChat(
               arguments: args,
             };
             output.content.push(toolCallBlock);
-            stream.push({ type: "toolcall_start", contentIndex: toolCallIndex, partial: output });
+            stream.push({ type: "toolcall_start", contentIndex: toolCallIdx, partial: output });
 
             // Ollama sends complete tool calls, so single delta + end
             const argsStr = JSON.stringify(args);
-            stream.push({ type: "toolcall_delta", contentIndex: toolCallIndex, delta: argsStr, partial: output });
-            stream.push({ type: "toolcall_end", contentIndex: toolCallIndex, toolCall: toolCallBlock, partial: output });
+            stream.push({ type: "toolcall_delta", contentIndex: toolCallIdx, delta: argsStr, partial: output });
+            stream.push({ type: "toolcall_end", contentIndex: toolCallIdx, toolCall: toolCallBlock, partial: output });
 
             hasToolCalls = true;
             toolCallIndex++;
@@ -622,34 +621,33 @@ async function retryNonStreaming(
 
   stream.push({ type: "start", partial: output });
 
-  let textIndex = 0;
-  let thinkingIndex = 0;
   let toolCallIndex = 0;
 
   if (result.message) {
     // Text content
     if (result.message.content) {
+      const idx = output.content.length;
       const textBlock = { type: "text", text: result.message.content };
       output.content.push(textBlock);
-      stream.push({ type: "text_start", contentIndex: textIndex, partial: output });
-      stream.push({ type: "text_delta", contentIndex: textIndex, delta: result.message.content, partial: output });
-      stream.push({ type: "text_end", contentIndex: textIndex, content: result.message.content, partial: output });
-      textIndex++;
+      stream.push({ type: "text_start", contentIndex: idx, partial: output });
+      stream.push({ type: "text_delta", contentIndex: idx, delta: result.message.content, partial: output });
+      stream.push({ type: "text_end", contentIndex: idx, content: result.message.content, partial: output });
     }
 
     // Thinking content
     if (result.message.thinking) {
+      const idx = output.content.length;
       const thinkingBlock = { type: "thinking", thinking: result.message.thinking };
       output.content.push(thinkingBlock);
-      stream.push({ type: "thinking_start", contentIndex: thinkingIndex, partial: output });
-      stream.push({ type: "thinking_delta", contentIndex: thinkingIndex, delta: result.message.thinking, partial: output });
-      stream.push({ type: "thinking_end", contentIndex: thinkingIndex, content: result.message.thinking, partial: output });
-      thinkingIndex++;
+      stream.push({ type: "thinking_start", contentIndex: idx, partial: output });
+      stream.push({ type: "thinking_delta", contentIndex: idx, delta: result.message.thinking, partial: output });
+      stream.push({ type: "thinking_end", contentIndex: idx, content: result.message.thinking, partial: output });
     }
 
     // Tool calls
     if (result.message.tool_calls && result.message.tool_calls.length > 0) {
       for (const tc of result.message.tool_calls) {
+        const idx = output.content.length;
         // Ollama may return arguments as a JSON string or as an object
         let args = tc.function.arguments;
         if (typeof args === "string") {
@@ -667,9 +665,9 @@ async function retryNonStreaming(
           arguments: args,
         };
         output.content.push(toolCallBlock);
-        stream.push({ type: "toolcall_start", contentIndex: toolCallIndex, partial: output });
-        stream.push({ type: "toolcall_delta", contentIndex: toolCallIndex, delta: JSON.stringify(args), partial: output });
-        stream.push({ type: "toolcall_end", contentIndex: toolCallIndex, toolCall: toolCallBlock, partial: output });
+        stream.push({ type: "toolcall_start", contentIndex: idx, partial: output });
+        stream.push({ type: "toolcall_delta", contentIndex: idx, delta: JSON.stringify(args), partial: output });
+        stream.push({ type: "toolcall_end", contentIndex: idx, toolCall: toolCallBlock, partial: output });
         toolCallIndex++;
       }
     }
