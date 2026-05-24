@@ -233,16 +233,28 @@ export function convertTools(
 ): OllamaToolDefinition[] {
   if (!tools || tools.length === 0) return [];
 
-  return tools
-    .filter((t) => t.type === "function" && t.function)
-    .map((t) => ({
+  return tools.map((t) => {
+    // Handle Ollama/OpenAI format: { type: "function", function: { name, description, parameters } }
+    if (t.type === "function" && t.function) {
+      return {
+        type: "function" as const,
+        function: {
+          name: String((t.function as Record<string, unknown>).name ?? ""),
+          description: String((t.function as Record<string, unknown>).description ?? ""),
+          parameters: ((t.function as Record<string, unknown>).parameters ?? {}) as Record<string, unknown>,
+        },
+      };
+    }
+    // Handle pi's agent-level format: { name, description, parameters } (built-in tools)
+    return {
       type: "function" as const,
       function: {
-        name: String((t.function as Record<string, unknown>).name ?? ""),
-        description: String((t.function as Record<string, unknown>).description ?? ""),
-        parameters: ((t.function as Record<string, unknown>).parameters ?? {}) as Record<string, unknown>,
+        name: String((t as Record<string, unknown>).name ?? ""),
+        description: String((t as Record<string, unknown>).description ?? ""),
+        parameters: ((t as Record<string, unknown>).parameters ?? {}) as Record<string, unknown>,
       },
-    }));
+    };
+  });
 }
 
 // ── ghost-token retry ──

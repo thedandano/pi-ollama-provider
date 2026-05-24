@@ -226,12 +226,60 @@ describe("convertTools", () => {
     expect(convertTools([])).toEqual([]);
   });
 
-  it("filters out non-function tools", () => {
+  it("converts non-function tools as flat format (no filtering)", () => {
+    // convertTools no longer filters — it maps all tools using the flat fallback
     const tools = [
       { type: "function", function: { name: "test", parameters: {} } },
-      { type: "other", function: { name: "bad", parameters: {} } },
+      { type: "other", name: "flat_tool", parameters: {} },
     ];
-    expect(convertTools(tools as any)).toHaveLength(1);
+    const result = convertTools(tools as any);
+    expect(result).toHaveLength(2);
+    expect(result[0].function.name).toBe("test");
+    expect(result[1].function.name).toBe("flat_tool");
+  });
+
+  it("handles pi's flat tool format (name/description/parameters)", () => {
+    // pi's built-in tools use flat format, not type+function wrapper
+    const tools = [
+      {
+        name: "bash",
+        description: "Execute a bash command",
+        parameters: { type: "object", properties: { command: { type: "string" } } },
+      },
+      {
+        name: "read",
+        description: "Read a file",
+        parameters: { type: "object", properties: { path: { type: "string" } } },
+      },
+    ];
+    const result = convertTools(tools);
+    expect(result).toHaveLength(2);
+    expect(result[0].type).toBe("function");
+    expect(result[0].function.name).toBe("bash");
+    expect(result[0].function.description).toBe("Execute a bash command");
+    expect(result[1].function.name).toBe("read");
+  });
+
+  it("handles mixed flat and wrapped tool formats", () => {
+    const tools = [
+      { name: "flat_tool", description: "Flat format", parameters: {} },
+      { type: "function", function: { name: "wrapped_tool", description: "Wrapped format", parameters: {} } },
+    ];
+    const result = convertTools(tools);
+    expect(result).toHaveLength(2);
+    expect(result[0].function.name).toBe("flat_tool");
+    expect(result[1].function.name).toBe("wrapped_tool");
+  });
+
+  it("handles tools missing optional fields gracefully", () => {
+    const tools = [
+      { name: "minimal" },
+    ];
+    const result = convertTools(tools as any);
+    expect(result).toHaveLength(1);
+    expect(result[0].function.name).toBe("minimal");
+    expect(result[0].function.description).toBe("");
+    expect(result[0].function.parameters).toEqual({});
   });
 });
 
