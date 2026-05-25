@@ -271,13 +271,19 @@ export function convertTools(
 // ── block merging ──
 
 /**
- * Merge adjacent same-type content blocks.
- * GLM sometimes interleaves tiny thinking fragments between text chunks,
- * creating fragmented multi-block responses (e.g. text "Based", thinking ".",
- * text " on the weather..."). Merging adjacent same-type blocks produces
- * clean output for the TUI and print mode.
+ * Merge adjacent same-type content blocks and absorb tiny interleaved
+ * thinking fragments.
+ *
+ * GLM streams in tiny alternating chunks (e.g. text "Based", thinking ".",
+ * text " on the weather..."). This produces fragmented multi-block responses
+ * that look ugly in the TUI.
+ *
+ * Two passes:
+ * 1. Merge adjacent same-type blocks (text+text, thinking+thinking)
+ * 2. Absorb tiny thinking fragments (≤5 chars) sandwiched between text blocks
  */
 export function mergeAdjacentBlocks(blocks: any[]): void {
+  // Pass 1: merge adjacent same-type blocks
   for (let i = blocks.length - 1; i > 0; i--) {
     const curr = blocks[i];
     const prev = blocks[i - 1];
@@ -288,6 +294,22 @@ export function mergeAdjacentBlocks(blocks: any[]): void {
     } else if (prev.type === "thinking" && curr.type === "thinking") {
       prev.thinking = (prev.thinking || "") + (curr.thinking || "");
       blocks.splice(i, 1);
+    }
+  }
+
+  // Pass 2: absorb tiny thinking fragments sandwiched between text blocks
+  for (let i = blocks.length - 1; i > 0; i--) {
+    const curr = blocks[i];
+    const prev = blocks[i - 1];
+    if (!curr || !prev) continue;
+    // prev is text, curr is tiny thinking, next is text
+    if (prev.type === "text" && curr.type === "thinking" && (curr.thinking || "").length <= 5) {
+      const next = blocks[i + 1];
+      if (next && next.type === "text") {
+        // Merge the two text blocks, dropping the tiny thinking
+        prev.text = (prev.text || "") + (next.text || "");
+        blocks.splice(i, 2); // removes both the thinking and the next text
+      }
     }
   }
 }

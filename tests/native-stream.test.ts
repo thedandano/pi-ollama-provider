@@ -689,6 +689,32 @@ describe("mergeAdjacentBlocks", () => {
     expect(blocks).toHaveLength(1);
     expect(blocks[0].text).toBe("alone");
   });
+
+  it("absorbs tiny thinking fragment between text blocks", () => {
+    // GLM outputs: text "I appreciate", thinking ".", text " the request"
+    const blocks = [
+      { type: "thinking", thinking: "Should I respond?" },
+      { type: "text", text: "I appreciate" },
+      { type: "thinking", thinking: "." },
+      { type: "text", text: " the request!" },
+    ];
+    mergeAdjacentBlocks(blocks);
+    // After merge: thinking(merged), text(merged across tiny thinking)
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0].type).toBe("thinking");
+    expect(blocks[1].type).toBe("text");
+    expect(blocks[1].text).toBe("I appreciate the request!");
+  });
+
+  it("does not absorb large thinking block between text blocks", () => {
+    const blocks = [
+      { type: "text", text: "Hello" },
+      { type: "thinking", thinking: "This is a long thoughtful analysis..." },
+      { type: "text", text: " world!" },
+    ];
+    mergeAdjacentBlocks(blocks);
+    expect(blocks).toHaveLength(3); // unchanged
+  });
 });
 
 // ════════════════════════════════════════════════════════════════
