@@ -195,6 +195,43 @@ describe("convertMessages", () => {
     expect(result[0].role).toBe("tool");
     expect(result[0].tool_call_id).toBe("tool_0");
     expect(result[0].content).toContain("file1.txt");
+    // Should extract clean text, not JSON.stringify the content array
+    expect(result[0].content).not.toContain('"type":"text"');
+  });
+
+  it("extracts clean text from pi's toolResult content array", () => {
+    // pi sends content as [{type:"text", text:"..."}] array
+    // convertMessages should extract the text, not JSON.stringify the array
+    const messages = [
+      {
+        role: "toolResult",
+        toolCallId: "tool_1",
+        toolName: "bash",
+        content: [{ type: "text", text: "output line 1" }, { type: "text", text: "output line 2" }],
+        isError: false,
+      },
+    ];
+    const result = convertMessages(messages);
+    expect(result[0].role).toBe("tool");
+    expect(result[0].content).toContain("output line 1");
+    expect(result[0].content).toContain("output line 2");
+    // Should be clean text, not a JSON array string
+    expect(result[0].content).not.toContain("{\"type\":\"text\"");
+  });
+
+  it("handles empty toolResult content gracefully", () => {
+    const messages = [
+      {
+        role: "toolResult",
+        toolCallId: "tool_2",
+        toolName: "bash",
+        content: [],
+        isError: false,
+      },
+    ];
+    const result = convertMessages(messages);
+    expect(result[0].role).toBe("tool");
+    expect(result[0].content).toBe("");
   });
 
   it("preserves assistant tool_calls", () => {

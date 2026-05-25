@@ -206,7 +206,18 @@ export function convertMessages(
     // Handle tool results
     if (role === "tool" || role === "toolResult" || role === "ipython") {
       const toolCallId = String(msg.tool_call_id ?? msg.toolCallId ?? "");
-      const resultContent = typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content);
+      // Extract clean text from pi's content block format [{type:"text", text:"..."}, ...]
+      let resultContent: string;
+      if (typeof msg.content === "string") {
+        resultContent = msg.content;
+      } else if (Array.isArray(msg.content)) {
+        resultContent = (msg.content as Array<Record<string, unknown>>)
+          .filter((b) => b.type === "text" && typeof b.text === "string")
+          .map((b) => b.text as string)
+          .join("\n");
+      } else {
+        resultContent = "";
+      }
       return {
         role: "tool" as const,
         content: resultContent,
@@ -370,7 +381,7 @@ export async function streamNativeChat(
   const output: any = {
     role: "assistant",
     content: [],
-    api: "openai-completions",
+    api: "ollama-native",
     provider: "ollama",
     model: model,
     usage: {
