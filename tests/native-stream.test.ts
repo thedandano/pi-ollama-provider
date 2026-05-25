@@ -15,6 +15,7 @@ import {
   isGhostTokenStream,
   isOllamaContextOverflow,
   streamNativeChat,
+  mergeAdjacentBlocks,
   type OllamaChatChunk,
   type OllamaToolCall,
 } from "../extensions/pi-ollama-provider/native-stream.js";
@@ -616,6 +617,81 @@ describe("Tool call arguments parsing", () => {
 });
 
 // ════════════════════════════════════════════════════════════════
+// mergeAdjacentBlocks
+// ════════════════════════════════════════════════════════════════
+
+describe("mergeAdjacentBlocks", () => {
+  it("merges adjacent text blocks", () => {
+    const blocks = [
+      { type: "text", text: "Hello " },
+      { type: "text", text: "world!" },
+    ];
+    mergeAdjacentBlocks(blocks);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].text).toBe("Hello world!");
+  });
+
+  it("merges adjacent thinking blocks", () => {
+    const blocks = [
+      { type: "thinking", thinking: "Step 1" },
+      { type: "thinking", thinking: ": analyze" },
+    ];
+    mergeAdjacentBlocks(blocks);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].thinking).toBe("Step 1: analyze");
+  });
+
+  it("does not merge interleaved thinking and text", () => {
+    const blocks = [
+      { type: "thinking", thinking: "I think" },
+      { type: "text", text: "Hello" },
+      { type: "thinking", thinking: "more thinking" },
+    ];
+    mergeAdjacentBlocks(blocks);
+    expect(blocks).toHaveLength(3);
+  });
+
+  it("merges only adjacent same-type blocks in mixed content", () => {
+    const blocks = [
+      { type: "thinking", thinking: "think1" },
+      { type: "text", text: "text1" },
+      { type: "text", text: "text2" },
+      { type: "thinking", thinking: "think2" },
+      { type: "thinking", thinking: "think3" },
+    ];
+    mergeAdjacentBlocks(blocks);
+    expect(blocks).toHaveLength(3);
+    expect(blocks[0].type).toBe("thinking");
+    expect(blocks[1].type).toBe("text");
+    expect(blocks[1].text).toBe("text1text2");
+    expect(blocks[2].type).toBe("thinking");
+    expect(blocks[2].thinking).toBe("think2think3");
+  });
+
+  it("does not merge tool call blocks", () => {
+    const blocks = [
+      { type: "toolCall", id: "tool_0", name: "bash", arguments: { command: "ls" } },
+      { type: "toolCall", id: "tool_1", name: "read", arguments: { path: "/tmp" } },
+    ];
+    mergeAdjacentBlocks(blocks);
+    expect(blocks).toHaveLength(2);
+  });
+
+  it("handles empty array", () => {
+    const blocks: any[] = [];
+    mergeAdjacentBlocks(blocks);
+    expect(blocks).toHaveLength(0);
+  });
+
+  it("handles single block", () => {
+    const blocks = [{ type: "text", text: "alone" }];
+    mergeAdjacentBlocks(blocks);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].text).toBe("alone");
+  });
+});
+
+// ════════════════════════════════════════════════════════════════
 // Content block ordering (regression: thinking-first models)
 // ════════════════════════════════════════════════════════════════
 
@@ -713,12 +789,15 @@ describe("Content block ordering", () => {
   });
 
   it("should handle multiple interleaved thinking/text blocks", async () => {
-    // GLM sometimes interleaves thinking snippets between text blocks
+    // GLM outputs all thinking chunks first, then all text chunks
+    // After mergeAdjacentBlocks, adjacent same-type blocks are merged
     mockFetchWithNDJSON([
-      JSON.stringify({ model: "test", created_at: "", message: { role: "assistant", content: "", thinking: "Step 1: Analyze" }, done: false }),
-      JSON.stringify({ model: "test", created_at: "", message: { role: "assistant", content: "Hi there" }, done: false }),
-      JSON.stringify({ model: "test", created_at: "", message: { role: "assistant", content: "", thinking: "Step 2: Format response" }, done: false }),
-      JSON.stringify({ model: "test", created_at: "", message: { role: "assistant", content: "! How can I help?" }, done: false }),
+      JSON.stringify({ model: "test", created_at: "", message: { role: "assistant", content: "", thinking: "Step 1: " }, done: false }),
+      JSON.stringify({ model: "test", created_at: "", message: { role: "assistant", content: "", thinking: "Analyze" }, done: false }),
+      JSON.stringify({ model: "test", created_at: "", message: { role: "assistant", content: "", thinking: " input" }, done: false }),
+      JSON.stringify({ model: "test", created_at: "", message: { role: "assistant", content: "Hi " }, done: false }),
+      JSON.stringify({ model: "test", created_at: "", message: { role: "assistant", content: "there" }, done: false }),
+      JSON.stringify({ model: "test", created_at: "", message: { role: "assistant", content: "!" }, done: false }),
       JSON.stringify({ model: "test", created_at: "", done: true, done_reason: "stop", eval_count: 100, prompt_eval_count: 5 }),
     ]);
 
@@ -741,20 +820,17 @@ describe("Content block ordering", () => {
 
     if (doneEvent) {
       const content = doneEvent.message.content;
-      // Should have 4 blocks: thinking, text, thinking, text
-      expect(content.length).toBe(4);
+      // After mergeAdjacentBlocks: thinking(merged 3), text(merged 3) = 2 blocks
+      expect(content.length).toBe(2);
 
-      // Each text block should have proper text, NOT on the thinking block
       expect(content[0].type).toBe("thinking");
+      expect(content[0].thinking).toContain("Step 1: Analyze input");
+
       expect(content[1].type).toBe("text");
-      expect(content[1].text).toBe("Hi there");
-      expect(content[2].type).toBe("thinking");
-      expect(content[3].type).toBe("text");
-      expect(content[3].text).toBe("! How can I help?");
+      expect(content[1].text).toBe("Hi there!");
 
       // No spurious 'text' on thinking blocks
       expect(content[0].text).toBeUndefined();
-      expect(content[2].text).toBeUndefined();
     } else if (errorEvent) {
       // At minimum check the structure collected so far
       const content = errorEvent.error.content;

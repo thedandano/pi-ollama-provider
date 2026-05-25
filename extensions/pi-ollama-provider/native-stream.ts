@@ -268,6 +268,30 @@ export function convertTools(
   });
 }
 
+// ── block merging ──
+
+/**
+ * Merge adjacent same-type content blocks.
+ * GLM sometimes interleaves tiny thinking fragments between text chunks,
+ * creating fragmented multi-block responses (e.g. text "Based", thinking ".",
+ * text " on the weather..."). Merging adjacent same-type blocks produces
+ * clean output for the TUI and print mode.
+ */
+export function mergeAdjacentBlocks(blocks: any[]): void {
+  for (let i = blocks.length - 1; i > 0; i--) {
+    const curr = blocks[i];
+    const prev = blocks[i - 1];
+    if (!curr || !prev) continue;
+    if (prev.type === "text" && curr.type === "text") {
+      prev.text = (prev.text || "") + (curr.text || "");
+      blocks.splice(i, 1);
+    } else if (prev.type === "thinking" && curr.type === "thinking") {
+      prev.thinking = (prev.thinking || "") + (curr.thinking || "");
+      blocks.splice(i, 1);
+    }
+  }
+}
+
 // ── ghost-token retry ──
 
 /**
@@ -560,6 +584,9 @@ export async function streamNativeChat(
         output.usage.totalTokens = output.usage.input + output.usage.output;
         output.stopReason = hasToolCalls ? "toolUse" : (chunk.done_reason === "length" ? "length" : "stop");
 
+        // Merge adjacent same-type blocks (GLM interleaves tiny thinking fragments)
+        mergeAdjacentBlocks(output.content);
+
         stream.push({ type: "done", reason: output.stopReason as "stop" | "length" | "toolUse", message: output });
         stream.end();
       }
@@ -702,6 +729,9 @@ async function retryNonStreaming(
 
   const hasToolCalls = result.message?.tool_calls && result.message.tool_calls.length > 0;
   output.stopReason = hasToolCalls ? "toolUse" : "stop";
+
+  // Merge adjacent same-type blocks
+  mergeAdjacentBlocks(output.content);
 
   stream.push({ type: "done", reason: output.stopReason as "stop" | "length" | "toolUse", message: output });
   stream.end();
