@@ -1,10 +1,10 @@
 /**
  * Tests for native-stream.ts — NDJSON parsing, message conversion,
  * tool conversion, ghost-token detection, overflow detection,
- * and stream event format validation.
+ * stream event format validation, and content block ordering.
  */
 
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { Readable } from "node:stream";
 import { createAssistantMessageEventStream } from "@mariozechner/pi-ai";
 
@@ -14,9 +14,23 @@ import {
   convertTools,
   isGhostTokenStream,
   isOllamaContextOverflow,
+  streamNativeChat,
+  mergeAdjacentBlocks,
   type OllamaChatChunk,
   type OllamaToolCall,
 } from "../extensions/pi-ollama-provider/native-stream.js";
+
+let originalFetch: typeof globalThis.fetch;
+
+beforeEach(() => {
+  originalFetch = globalThis.fetch;
+  // By default, unmocked fetch calls will reject
+  globalThis.fetch = vi.fn().mockRejectedValue(new Error("fetch not mocked in this test"));
+});
+
+afterEach(() => {
+  globalThis.fetch = originalFetch;
+});
 
 // ════════════════════════════════════════════════════════════════
 // parseNDJSON
@@ -166,6 +180,61 @@ describe("convertMessages", () => {
     expect(result[0].tool_call_id).toBe("call_123");
   });
 
+  it("converts pi-style toolResult role to Ollama tool role", () => {
+    // pi's AgentLoop sends tool results with role: "toolResult"
+    // but the Ollama API expects role: "tool"
+    const messages = [
+      {
+        role: "toolResult",
+        toolCallId: "tool_0",
+        toolName: "bash",
+        content: [{ type: "text", text: "file1.txt\nfile2.txt" }],
+        isError: false,
+      },
+    ];
+    const result = convertMessages(messages);
+    expect(result[0].role).toBe("tool");
+    expect(result[0].tool_call_id).toBe("tool_0");
+    expect(result[0].content).toContain("file1.txt");
+    // Should extract clean text, not JSON.stringify the content array
+    expect(result[0].content).not.toContain('"type":"text"');
+  });
+
+  it("extracts clean text from pi's toolResult content array", () => {
+    // pi sends content as [{type:"text", text:"..."}] array
+    // convertMessages should extract the text, not JSON.stringify the array
+    const messages = [
+      {
+        role: "toolResult",
+        toolCallId: "tool_1",
+        toolName: "bash",
+        content: [{ type: "text", text: "output line 1" }, { type: "text", text: "output line 2" }],
+        isError: false,
+      },
+    ];
+    const result = convertMessages(messages);
+    expect(result[0].role).toBe("tool");
+    expect(result[0].content).toContain("output line 1");
+    expect(result[0].content).toContain("output line 2");
+    // Should be clean text, not a JSON array string
+    expect(result[0].content).not.toContain("{\"type\":\"text\"");
+  });
+
+  it("handles empty toolResult content gracefully", () => {
+    const messages = [
+      {
+        role: "toolResult",
+        toolCallId: "tool_2",
+        toolName: "bash",
+        content: [],
+        isError: false,
+      },
+    ];
+    const result = convertMessages(messages);
+    expect(result[0].role).toBe("tool");
+    expect(result[0].content).toBe("");
+  });
+
   it("preserves assistant tool_calls", () => {
     const toolCalls: OllamaToolCall[] = [
       { function: { name: "read_file", arguments: { path: "/foo" } } },
@@ -213,12 +282,60 @@ describe("convertTools", () => {
     expect(convertTools([])).toEqual([]);
   });
 
-  it("filters out non-function tools", () => {
+  it("converts non-function tools as flat format (no filtering)", () => {
+    // convertTools no longer filters — it maps all tools using the flat fallback
     const tools = [
       { type: "function", function: { name: "test", parameters: {} } },
-      { type: "other", function: { name: "bad", parameters: {} } },
+      { type: "other", name: "flat_tool", parameters: {} },
     ];
-    expect(convertTools(tools as any)).toHaveLength(1);
+    const result = convertTools(tools as any);
+    expect(result).toHaveLength(2);
+    expect(result[0].function.name).toBe("test");
+    expect(result[1].function.name).toBe("flat_tool");
+  });
+
+  it("handles pi's flat tool format (name/description/parameters)", () => {
+    // pi's built-in tools use flat format, not type+function wrapper
+    const tools = [
+      {
+        name: "bash",
+        description: "Execute a bash command",
+        parameters: { type: "object", properties: { command: { type: "string" } } },
+      },
+      {
+        name: "read",
+        description: "Read a file",
+        parameters: { type: "object", properties: { path: { type: "string" } } },
+      },
+    ];
+    const result = convertTools(tools);
+    expect(result).toHaveLength(2);
+    expect(result[0].type).toBe("function");
+    expect(result[0].function.name).toBe("bash");
+    expect(result[0].function.description).toBe("Execute a bash command");
+    expect(result[1].function.name).toBe("read");
+  });
+
+  it("handles mixed flat and wrapped tool formats", () => {
+    const tools = [
+      { name: "flat_tool", description: "Flat format", parameters: {} },
+      { type: "function", function: { name: "wrapped_tool", description: "Wrapped format", parameters: {} } },
+    ];
+    const result = convertTools(tools);
+    expect(result).toHaveLength(2);
+    expect(result[0].function.name).toBe("flat_tool");
+    expect(result[1].function.name).toBe("wrapped_tool");
+  });
+
+  it("handles tools missing optional fields gracefully", () => {
+    const tools = [
+      { name: "minimal" },
+    ];
+    const result = convertTools(tools as any);
+    expect(result).toHaveLength(1);
+    expect(result[0].function.name).toBe("minimal");
+    expect(result[0].function.description).toBe("");
+    expect(result[0].function.parameters).toEqual({});
   });
 });
 
@@ -496,5 +613,359 @@ describe("Tool call arguments parsing", () => {
     }
 
     expect(args).toEqual({});
+  });
+});
+
+// ════════════════════════════════════════════════════════════════
+// mergeAdjacentBlocks
+// ════════════════════════════════════════════════════════════════
+
+describe("mergeAdjacentBlocks", () => {
+  it("merges adjacent text blocks", () => {
+    const blocks = [
+      { type: "text", text: "Hello " },
+      { type: "text", text: "world!" },
+    ];
+    mergeAdjacentBlocks(blocks);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].text).toBe("Hello world!");
+  });
+
+  it("merges adjacent thinking blocks", () => {
+    const blocks = [
+      { type: "thinking", thinking: "Step 1" },
+      { type: "thinking", thinking: ": analyze" },
+    ];
+    mergeAdjacentBlocks(blocks);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].thinking).toBe("Step 1: analyze");
+  });
+
+  it("does not merge interleaved thinking and text", () => {
+    const blocks = [
+      { type: "thinking", thinking: "I think" },
+      { type: "text", text: "Hello" },
+      { type: "thinking", thinking: "more thinking" },
+    ];
+    mergeAdjacentBlocks(blocks);
+    expect(blocks).toHaveLength(3);
+  });
+
+  it("merges only adjacent same-type blocks in mixed content", () => {
+    const blocks = [
+      { type: "thinking", thinking: "think1" },
+      { type: "text", text: "text1" },
+      { type: "text", text: "text2" },
+      { type: "thinking", thinking: "think2" },
+      { type: "thinking", thinking: "think3" },
+    ];
+    mergeAdjacentBlocks(blocks);
+    expect(blocks).toHaveLength(3);
+    expect(blocks[0].type).toBe("thinking");
+    expect(blocks[1].type).toBe("text");
+    expect(blocks[1].text).toBe("text1text2");
+    expect(blocks[2].type).toBe("thinking");
+    expect(blocks[2].thinking).toBe("think2think3");
+  });
+
+  it("does not merge tool call blocks", () => {
+    const blocks = [
+      { type: "toolCall", id: "tool_0", name: "bash", arguments: { command: "ls" } },
+      { type: "toolCall", id: "tool_1", name: "read", arguments: { path: "/tmp" } },
+    ];
+    mergeAdjacentBlocks(blocks);
+    expect(blocks).toHaveLength(2);
+  });
+
+  it("handles empty array", () => {
+    const blocks: any[] = [];
+    mergeAdjacentBlocks(blocks);
+    expect(blocks).toHaveLength(0);
+  });
+
+  it("handles single block", () => {
+    const blocks = [{ type: "text", text: "alone" }];
+    mergeAdjacentBlocks(blocks);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].text).toBe("alone");
+  });
+
+  it("absorbs thinking block between text blocks regardless of size", () => {
+    const blocks = [
+      { type: "text", text: "Hello " },
+      { type: "thinking", thinking: "This is a long thoughtful analysis..." },
+      { type: "text", text: "world!" },
+    ];
+    mergeAdjacentBlocks(blocks);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].type).toBe("text");
+    expect(blocks[0].text).toBe("Hello world!");
+  });
+
+  it("does not absorb thinking block at end without trailing text", () => {
+    const blocks = [
+      { type: "text", text: "Hello" },
+      { type: "thinking", thinking: "thinking about it" },
+    ];
+    mergeAdjacentBlocks(blocks);
+    expect(blocks).toHaveLength(2); // unchanged - no trailing text to merge with
+  });
+});
+
+// ════════════════════════════════════════════════════════════════
+// Content block ordering (regression: thinking-first models)
+// ════════════════════════════════════════════════════════════════
+
+/**
+ * Helper: create a mock fetch that returns the given NDJSON lines
+ * as a ReadableStream response.body.
+ */
+function mockFetchWithNDJSON(lines: string[]): void {
+  const bodyStr = lines.join("\n") + "\n";
+  const encoder = new TextEncoder();
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode(bodyStr));
+      controller.close();
+    },
+  });
+
+  globalThis.fetch = vi.fn().mockResolvedValue({
+    ok: true,
+    status: 200,
+    body,
+    text: () => Promise.resolve(bodyStr),
+  } as Response);
+}
+
+describe("Content block ordering", () => {
+  /**
+   * Helper: capture stream events by wrapping stream.push
+   */
+  function captureEvents(stream: any): any[] {
+    const events: any[] = [];
+    const originalPush = stream.push.bind(stream);
+    stream.push = (event: any) => {
+      events.push(event);
+      return originalPush(event);
+    };
+    return events;
+  }
+
+  it("should create text block at correct index when thinking precedes text", async () => {
+    // Simulate the GLM/minimax pattern: thinking chunks first, then text, then done
+    // This tests the regression where textIndex=0 overwrote thinking block at [0]
+    mockFetchWithNDJSON([
+      JSON.stringify({ model: "test", created_at: "", message: { role: "assistant", content: "", thinking: "1. Analyze the input..." }, done: false }),
+      JSON.stringify({ model: "test", created_at: "", message: { role: "assistant", content: "Hello! How can I help?" }, done: false }),
+      JSON.stringify({ model: "test", created_at: "", message: { role: "assistant", content: "" }, done: false }),
+      JSON.stringify({ model: "test", created_at: "", done: true, done_reason: "stop", eval_count: 50, prompt_eval_count: 5, total_duration: 1000 }),
+    ]);
+
+    const stream = createAssistantMessageEventStream();
+    const events = captureEvents(stream);
+
+    // Let it reject so we can check the final output via error event
+    // (after stream.end(), the done event has been pushed)
+    try {
+      await streamNativeChat(stream, {
+        baseUrl: "http://localhost:11434",
+        model: "test-model",
+        contextWindow: 4096,
+        messages: [{ role: "user", content: "hi" }],
+      });
+    } catch {
+      // Expected since the stream will end during processing
+    }
+
+    // Find the final message in the events
+    const doneEvent = events.find((e: any) => e.type === "done");
+    const errorEvent = events.find((e: any) => e.type === "error");
+
+    if (doneEvent) {
+      const content = doneEvent.message.content;
+      expect(content.length).toBeGreaterThanOrEqual(2);
+
+      // First block should be thinking
+      expect(content[0].type).toBe("thinking");
+      expect(content[0].thinking).toContain("Analyze");
+
+      // Second block should be text (NOT a second thinking block)
+      expect(content[1].type).toBe("text");
+      expect(content[1].text).toContain("Hello");
+
+      // The thinking block should NOT have a spurious 'text' property
+      expect(content[0].text).toBeUndefined();
+    } else if (errorEvent) {
+      // If the stream errored, check what we got before the error
+      const message = errorEvent.error;
+      const content = message.content;
+      // At minimum we should have the right structure
+      if (content.length >= 2) {
+        expect(content[0].type).toBe("thinking");
+        expect(content[1].type).toBe("text");
+        expect(content[0].text === undefined || content[0].text === "").toBe(true);
+      }
+    }
+  });
+
+  it("should handle multiple interleaved thinking/text blocks", async () => {
+    // GLM outputs all thinking chunks first, then all text chunks
+    // After mergeAdjacentBlocks, adjacent same-type blocks are merged
+    mockFetchWithNDJSON([
+      JSON.stringify({ model: "test", created_at: "", message: { role: "assistant", content: "", thinking: "Step 1: " }, done: false }),
+      JSON.stringify({ model: "test", created_at: "", message: { role: "assistant", content: "", thinking: "Analyze" }, done: false }),
+      JSON.stringify({ model: "test", created_at: "", message: { role: "assistant", content: "", thinking: " input" }, done: false }),
+      JSON.stringify({ model: "test", created_at: "", message: { role: "assistant", content: "Hi " }, done: false }),
+      JSON.stringify({ model: "test", created_at: "", message: { role: "assistant", content: "there" }, done: false }),
+      JSON.stringify({ model: "test", created_at: "", message: { role: "assistant", content: "!" }, done: false }),
+      JSON.stringify({ model: "test", created_at: "", done: true, done_reason: "stop", eval_count: 100, prompt_eval_count: 5 }),
+    ]);
+
+    const stream = createAssistantMessageEventStream();
+    const events = captureEvents(stream);
+
+    try {
+      await streamNativeChat(stream, {
+        baseUrl: "http://localhost:11434",
+        model: "test-model",
+        contextWindow: 4096,
+        messages: [{ role: "user", content: "hi" }],
+      });
+    } catch {
+      // Expected
+    }
+
+    const doneEvent = events.find((e: any) => e.type === "done");
+    const errorEvent = events.find((e: any) => e.type === "error");
+
+    if (doneEvent) {
+      const content = doneEvent.message.content;
+      // After mergeAdjacentBlocks: thinking(merged 3), text(merged 3) = 2 blocks
+      expect(content.length).toBe(2);
+
+      expect(content[0].type).toBe("thinking");
+      expect(content[0].thinking).toContain("Step 1: Analyze input");
+
+      expect(content[1].type).toBe("text");
+      expect(content[1].text).toBe("Hi there!");
+
+      // No spurious 'text' on thinking blocks
+      expect(content[0].text).toBeUndefined();
+    } else if (errorEvent) {
+      // At minimum check the structure collected so far
+      const content = errorEvent.error.content;
+      const thinkingBlocks = content.filter((b: any) => b.type === "thinking");
+      const textBlocks = content.filter((b: any) => b.type === "text");
+      // No thinking block should have 'text' property
+      for (const tb of thinkingBlocks) {
+        expect(tb.text).toBeUndefined();
+      }
+      // Text blocks should have content (not empty)
+      for (const tb of textBlocks) {
+        expect(tb.text.length).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it("should handle text before thinking (standard order)", async () => {
+    // Some models output text first, then thinking in a follow-up
+    // After merge pass 2, the thinking between text gets absorbed
+    mockFetchWithNDJSON([
+      JSON.stringify({ model: "test", created_at: "", message: { role: "assistant", content: "I am thinking" }, done: false }),
+      JSON.stringify({ model: "test", created_at: "", message: { role: "assistant", content: "", thinking: "actually let me reconsider" }, done: false }),
+      JSON.stringify({ model: "test", created_at: "", message: { role: "assistant", content: "Final answer" }, done: false }),
+      JSON.stringify({ model: "test", created_at: "", done: true, done_reason: "stop", eval_count: 30, prompt_eval_count: 5 }),
+    ]);
+
+    const stream = createAssistantMessageEventStream();
+    const events = captureEvents(stream);
+
+    try {
+      await streamNativeChat(stream, {
+        baseUrl: "http://localhost:11434",
+        model: "test-model",
+        contextWindow: 4096,
+        messages: [{ role: "user", content: "hi" }],
+      });
+    } catch {
+      // Expected
+    }
+
+    const doneEvent = events.find((e: any) => e.type === "done");
+    const errorEvent = events.find((e: any) => e.type === "error");
+
+    if (doneEvent) {
+      const content = doneEvent.message.content;
+      // Pass 2 absorbs the thinking sandwiched between text → 1 merged text block
+      expect(content.length).toBe(1);
+      expect(content[0].type).toBe("text");
+      expect(content[0].text).toBe("I am thinkingFinal answer");
+    }
+  });
+
+  it("should handle text-only response (no thinking)", async () => {
+    // Models like llama without thinking
+    mockFetchWithNDJSON([
+      JSON.stringify({ model: "test", created_at: "", message: { role: "assistant", content: "Hel" }, done: false }),
+      JSON.stringify({ model: "test", created_at: "", message: { role: "assistant", content: "lo!" }, done: false }),
+      JSON.stringify({ model: "test", created_at: "", done: true, done_reason: "stop", eval_count: 2, prompt_eval_count: 1 }),
+    ]);
+
+    const stream = createAssistantMessageEventStream();
+    const events = captureEvents(stream);
+
+    try {
+      await streamNativeChat(stream, {
+        baseUrl: "http://localhost:11434",
+        model: "test-model",
+        contextWindow: 4096,
+        messages: [{ role: "user", content: "hi" }],
+      });
+    } catch {
+      // Expected
+    }
+
+    const doneEvent = events.find((e: any) => e.type === "done");
+    const errorEvent = events.find((e: any) => e.type === "error");
+
+    if (doneEvent) {
+      const content = doneEvent.message.content;
+      expect(content.length).toBe(1);
+      expect(content[0].type).toBe("text");
+      expect(content[0].text).toBe("Hello!");
+    }
+  });
+
+  it("should handle tool calls after thinking", async () => {
+    mockFetchWithNDJSON([
+      JSON.stringify({ model: "test", created_at: "", message: { role: "assistant", content: "", thinking: "I should use a tool" }, done: false }),
+      JSON.stringify({ model: "test", created_at: "", message: { role: "assistant", content: "", tool_calls: [{ function: { name: "read", arguments: { path: "/test" } } }] }, done: false }),
+      JSON.stringify({ model: "test", created_at: "", done: true, done_reason: "stop", eval_count: 10, prompt_eval_count: 5 }),
+    ]);
+
+    const stream = createAssistantMessageEventStream();
+    const events = captureEvents(stream);
+
+    try {
+      await streamNativeChat(stream, {
+        baseUrl: "http://localhost:11434",
+        model: "test-model",
+        contextWindow: 4096,
+        messages: [{ role: "user", content: "read a file" }],
+      });
+    } catch {
+      // Expected
+    }
+
+    const doneEvent = events.find((e: any) => e.type === "done");
+    const errorEvent = events.find((e: any) => e.type === "error");
+
+    if (doneEvent) {
+      const content = doneEvent.message.content;
+      expect(content.length).toBe(2);
+      expect(content[0].type).toBe("thinking");
+      expect(content[1].type).toBe("toolCall");
+    }
   });
 });

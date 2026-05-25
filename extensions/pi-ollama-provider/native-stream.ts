@@ -204,9 +204,20 @@ export function convertMessages(
       : undefined;
 
     // Handle tool results
-    if (role === "tool" || role === "ipython") {
-      const toolCallId = String(msg.tool_call_id ?? "");
-      const resultContent = typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content);
+    if (role === "tool" || role === "toolResult" || role === "ipython") {
+      const toolCallId = String(msg.tool_call_id ?? msg.toolCallId ?? "");
+      // Extract clean text from pi's content block format [{type:"text", text:"..."}, ...]
+      let resultContent: string;
+      if (typeof msg.content === "string") {
+        resultContent = msg.content;
+      } else if (Array.isArray(msg.content)) {
+        resultContent = (msg.content as Array<Record<string, unknown>>)
+          .filter((b) => b.type === "text" && typeof b.text === "string")
+          .map((b) => b.text as string)
+          .join("\n");
+      } else {
+        resultContent = "";
+      }
       return {
         role: "tool" as const,
         content: resultContent,
@@ -233,16 +244,74 @@ export function convertTools(
 ): OllamaToolDefinition[] {
   if (!tools || tools.length === 0) return [];
 
-  return tools
-    .filter((t) => t.type === "function" && t.function)
-    .map((t) => ({
+  return tools.map((t) => {
+    // Handle Ollama/OpenAI format: { type: "function", function: { name, description, parameters } }
+    if (t.type === "function" && t.function) {
+      return {
+        type: "function" as const,
+        function: {
+          name: String((t.function as Record<string, unknown>).name ?? ""),
+          description: String((t.function as Record<string, unknown>).description ?? ""),
+          parameters: ((t.function as Record<string, unknown>).parameters ?? {}) as Record<string, unknown>,
+        },
+      };
+    }
+    // Handle pi's agent-level format: { name, description, parameters } (built-in tools)
+    return {
       type: "function" as const,
       function: {
-        name: String((t.function as Record<string, unknown>).name ?? ""),
-        description: String((t.function as Record<string, unknown>).description ?? ""),
-        parameters: ((t.function as Record<string, unknown>).parameters ?? {}) as Record<string, unknown>,
+        name: String((t as Record<string, unknown>).name ?? ""),
+        description: String((t as Record<string, unknown>).description ?? ""),
+        parameters: ((t as Record<string, unknown>).parameters ?? {}) as Record<string, unknown>,
       },
-    }));
+    };
+  });
+}
+
+// ── block merging ──
+
+/**
+ * Merge adjacent same-type content blocks and absorb interleaved
+ * thinking blocks that fall between text blocks.
+ *
+ * GLM outputs thinking tokens in a long contiguous block, then text.
+ * But occasionally it emits a trailing thinking fragment after text
+ * has already started (e.g. text "I appreciate", thinking ".",
+ * text " the request!"). This creates fragmented multi-block responses.
+ *
+ * Two passes:
+ * 1. Merge adjacent same-type blocks (text+text, thinking+thinking)
+ * 2. Absorb any thinking block sandwiched between two text blocks
+ */
+export function mergeAdjacentBlocks(blocks: any[]): void {
+  // Pass 1: merge adjacent same-type blocks
+  for (let i = blocks.length - 1; i > 0; i--) {
+    const curr = blocks[i];
+    const prev = blocks[i - 1];
+    if (!curr || !prev) continue;
+    if (prev.type === "text" && curr.type === "text") {
+      prev.text = (prev.text || "") + (curr.text || "");
+      blocks.splice(i, 1);
+    } else if (prev.type === "thinking" && curr.type === "thinking") {
+      prev.thinking = (prev.thinking || "") + (curr.thinking || "");
+      blocks.splice(i, 1);
+    }
+  }
+
+  // Pass 2: absorb thinking blocks sandwiched between text blocks
+  for (let i = blocks.length - 1; i > 0; i--) {
+    const curr = blocks[i];
+    const prev = blocks[i - 1];
+    if (!curr || !prev) continue;
+    if (prev.type === "text" && curr.type === "thinking") {
+      const next = blocks[i + 1];
+      if (next && next.type === "text") {
+        // Merge the two text blocks, dropping the thinking block entirely
+        prev.text = (prev.text || "") + (next.text || "");
+        blocks.splice(i, 2);
+      }
+    }
+  }
 }
 
 // ── ghost-token retry ──
@@ -358,7 +427,7 @@ export async function streamNativeChat(
   const output: any = {
     role: "assistant",
     content: [],
-    api: "openai-completions",
+    api: "ollama-native",
     provider: "ollama",
     model: model,
     usage: {
@@ -537,6 +606,9 @@ export async function streamNativeChat(
         output.usage.totalTokens = output.usage.input + output.usage.output;
         output.stopReason = hasToolCalls ? "toolUse" : (chunk.done_reason === "length" ? "length" : "stop");
 
+        // Merge adjacent same-type blocks (GLM interleaves tiny thinking fragments)
+        mergeAdjacentBlocks(output.content);
+
         stream.push({ type: "done", reason: output.stopReason as "stop" | "length" | "toolUse", message: output });
         stream.end();
       }
@@ -679,6 +751,9 @@ async function retryNonStreaming(
 
   const hasToolCalls = result.message?.tool_calls && result.message.tool_calls.length > 0;
   output.stopReason = hasToolCalls ? "toolUse" : "stop";
+
+  // Merge adjacent same-type blocks
+  mergeAdjacentBlocks(output.content);
 
   stream.push({ type: "done", reason: output.stopReason as "stop" | "length" | "toolUse", message: output });
   stream.end();
