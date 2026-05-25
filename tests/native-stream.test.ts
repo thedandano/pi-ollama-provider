@@ -690,30 +690,25 @@ describe("mergeAdjacentBlocks", () => {
     expect(blocks[0].text).toBe("alone");
   });
 
-  it("absorbs tiny thinking fragment between text blocks", () => {
-    // GLM outputs: text "I appreciate", thinking ".", text " the request"
+  it("absorbs thinking block between text blocks regardless of size", () => {
     const blocks = [
-      { type: "thinking", thinking: "Should I respond?" },
-      { type: "text", text: "I appreciate" },
-      { type: "thinking", thinking: "." },
-      { type: "text", text: " the request!" },
+      { type: "text", text: "Hello " },
+      { type: "thinking", thinking: "This is a long thoughtful analysis..." },
+      { type: "text", text: "world!" },
     ];
     mergeAdjacentBlocks(blocks);
-    // After merge: thinking(merged), text(merged across tiny thinking)
-    expect(blocks).toHaveLength(2);
-    expect(blocks[0].type).toBe("thinking");
-    expect(blocks[1].type).toBe("text");
-    expect(blocks[1].text).toBe("I appreciate the request!");
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].type).toBe("text");
+    expect(blocks[0].text).toBe("Hello world!");
   });
 
-  it("does not absorb large thinking block between text blocks", () => {
+  it("does not absorb thinking block at end without trailing text", () => {
     const blocks = [
       { type: "text", text: "Hello" },
-      { type: "thinking", thinking: "This is a long thoughtful analysis..." },
-      { type: "text", text: " world!" },
+      { type: "thinking", thinking: "thinking about it" },
     ];
     mergeAdjacentBlocks(blocks);
-    expect(blocks).toHaveLength(3); // unchanged
+    expect(blocks).toHaveLength(2); // unchanged - no trailing text to merge with
   });
 });
 
@@ -875,6 +870,7 @@ describe("Content block ordering", () => {
 
   it("should handle text before thinking (standard order)", async () => {
     // Some models output text first, then thinking in a follow-up
+    // After merge pass 2, the thinking between text gets absorbed
     mockFetchWithNDJSON([
       JSON.stringify({ model: "test", created_at: "", message: { role: "assistant", content: "I am thinking" }, done: false }),
       JSON.stringify({ model: "test", created_at: "", message: { role: "assistant", content: "", thinking: "actually let me reconsider" }, done: false }),
@@ -901,13 +897,10 @@ describe("Content block ordering", () => {
 
     if (doneEvent) {
       const content = doneEvent.message.content;
-      // Should have: text, thinking, text
-      expect(content.length).toBe(3);
+      // Pass 2 absorbs the thinking sandwiched between text → 1 merged text block
+      expect(content.length).toBe(1);
       expect(content[0].type).toBe("text");
-      expect(content[0].text).toBe("I am thinking");
-      expect(content[1].type).toBe("thinking");
-      expect(content[2].type).toBe("text");
-      expect(content[2].text).toBe("Final answer");
+      expect(content[0].text).toBe("I am thinkingFinal answer");
     }
   });
 

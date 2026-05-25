@@ -271,16 +271,17 @@ export function convertTools(
 // ── block merging ──
 
 /**
- * Merge adjacent same-type content blocks and absorb tiny interleaved
- * thinking fragments.
+ * Merge adjacent same-type content blocks and absorb interleaved
+ * thinking blocks that fall between text blocks.
  *
- * GLM streams in tiny alternating chunks (e.g. text "Based", thinking ".",
- * text " on the weather..."). This produces fragmented multi-block responses
- * that look ugly in the TUI.
+ * GLM outputs thinking tokens in a long contiguous block, then text.
+ * But occasionally it emits a trailing thinking fragment after text
+ * has already started (e.g. text "I appreciate", thinking ".",
+ * text " the request!"). This creates fragmented multi-block responses.
  *
  * Two passes:
  * 1. Merge adjacent same-type blocks (text+text, thinking+thinking)
- * 2. Absorb tiny thinking fragments (≤5 chars) sandwiched between text blocks
+ * 2. Absorb any thinking block sandwiched between two text blocks
  */
 export function mergeAdjacentBlocks(blocks: any[]): void {
   // Pass 1: merge adjacent same-type blocks
@@ -297,18 +298,17 @@ export function mergeAdjacentBlocks(blocks: any[]): void {
     }
   }
 
-  // Pass 2: absorb tiny thinking fragments sandwiched between text blocks
+  // Pass 2: absorb thinking blocks sandwiched between text blocks
   for (let i = blocks.length - 1; i > 0; i--) {
     const curr = blocks[i];
     const prev = blocks[i - 1];
     if (!curr || !prev) continue;
-    // prev is text, curr is tiny thinking, next is text
-    if (prev.type === "text" && curr.type === "thinking" && (curr.thinking || "").length <= 5) {
+    if (prev.type === "text" && curr.type === "thinking") {
       const next = blocks[i + 1];
       if (next && next.type === "text") {
-        // Merge the two text blocks, dropping the tiny thinking
+        // Merge the two text blocks, dropping the thinking block entirely
         prev.text = (prev.text || "") + (next.text || "");
-        blocks.splice(i, 2); // removes both the thinking and the next text
+        blocks.splice(i, 2);
       }
     }
   }
