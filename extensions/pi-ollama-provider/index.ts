@@ -135,7 +135,7 @@ function createNativeStreamSimple(
       ollamaOptions,
       signal: options?.signal,
       keepAlive: settings.keepAlive || getDefaultKeepAlive(),
-      hasThinkingMode: !!model.reasoning && options?.reasoningEffort !== undefined && options?.reasoningEffort !== 'off',
+      hasThinkingMode: !!model.reasoning && options?.reasoningEffort !== undefined && options?.reasoningEffort !== "off",
     }).catch(() => {
       // Errors are already pushed to the stream via error events
     });

@@ -852,6 +852,32 @@ describe("redirectThinkingText", () => {
     expect(blocks).toHaveLength(1);
     expect(blocks[0].type).toBe("text"); // preserved
   });
+
+  it("does not redirect 'Let me know...' (user-facing exclusion)", () => {
+    const blocks = [
+      { type: "thinking", thinking: "I've finished the task." },
+      { type: "text", text: "Let me know if you have any questions!" },
+    ];
+    redirectThinkingText(blocks, true);
+    expect(blocks).toHaveLength(2);
+    expect(blocks[1].type).toBe("text"); // NOT redirected
+    expect(blocks[1].text).toBe("Let me know if you have any questions!");
+  });
+
+  it("prepends when thinking-literal text appears before the thinking block (preserves order)", () => {
+    // text-before-thinking: the literal should be prepended, not appended
+    const blocks = [
+      { type: "text", text: "Now I'll check the file." },
+      { type: "thinking", thinking: "The file should be at /tmp/test." },
+      { type: "toolCall", id: "tool_0", name: "read", arguments: { path: "/tmp/test" } },
+    ];
+    redirectThinkingText(blocks, true);
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0].type).toBe("thinking");
+    // text prepended before existing thinking — order preserved
+    expect(blocks[0].thinking).toBe("Now I'll check the file.\nThe file should be at /tmp/test.");
+    expect(blocks[1].type).toBe("toolCall");
+  });
 });
 
 // ════════════════════════════════════════════════════════════════

@@ -365,17 +365,19 @@ export function mergeAdjacentBlocks(blocks: any[]): void {
  * 3. The text matches common thinking-literal patterns
  */
 const THINKING_LITERAL_PATTERNS = [
-  /^Let me\b/i,
-  /^Now let\b/i,
+  // "Let me" — but NOT "Let me know" (user-facing)
+  /^Let me\b(?!.*\bknow\b)/i,
+  /^Now let\b(?!.*\bknow\b)/i,
   /^Now I\b/i,
   /^Good[,—\s]/i,
   /^OK[,—\.\s]/i,
   /^Alright[,—\s]/i,
   /^Hmm[,\s]/i,
-  /^I (?:need|should|will|can|'ll|would)\b/i,
+  /^I (?:need|should|will|can|would)\b/i,
   /^I'll\b/i,
   /^I've\b/i,
-  /^Let's\b/i,
+  // "Let's" only for action verbs — not explanatory openers
+  /^Let's (?:start|check|look|try|run|see|verify|test|install|create|add|fix|update|use|build|make)/i,
   /^First,?\s/i,
   /^Next,?\s/i,
   /^The user\b/i,
@@ -384,6 +386,12 @@ const THINKING_LITERAL_PATTERNS = [
   /^I see[—,\s\.]/i,
   /^I (?:also|already|still)\b/i,
   /^This (?:looks|seems|appears)\b/i,
+];
+
+/** Phrases that superficially match patterns above but are user-facing. */
+const THINKING_LITERAL_EXCLUSIONS = [
+  /^Let me know\b/i,
+  /^Let's (?:say|consider|assume|think|talk|discuss|explore)/i,
 ];
 
 /** Maximum text length (in chars) to consider for thinking redirection. */
@@ -396,6 +404,7 @@ const THINKING_LITERAL_MAX_LENGTH = 200;
 function looksLikeThinkingLiteral(text: string): boolean {
   const trimmed = text.trim();
   if (!trimmed || trimmed.length > THINKING_LITERAL_MAX_LENGTH) return false;
+  if (THINKING_LITERAL_EXCLUSIONS.some((p) => p.test(trimmed))) return false;
   return THINKING_LITERAL_PATTERNS.some((p) => p.test(trimmed));
 }
 
@@ -407,9 +416,12 @@ function looksLikeThinkingLiteral(text: string): boolean {
  * those statements and moves their content into thinking blocks.
  *
  * Strategy:
- * - If there's an existing thinking block in the response, merge into it
- * - If there's no existing thinking block, convert the text block to a thinking block
- * - Only redirects text blocks that match thinking-literal patterns
+ * - If a thinking block exists in the response, merge into the nearest one.
+ *   When the nearest thinking block is before the text, append the text.
+ *   When it is after the text (text appears first), prepend to preserve order.
+ * - If no thinking block exists, convert the text block into a thinking block.
+ * - Only redirects text blocks that match thinking-literal patterns and are
+ *   not on the exclusion list.
  * - Preserves text blocks that don't match patterns (likely real user-facing content)
  *
  * @param blocks The content blocks array (mutated in place)
@@ -459,8 +471,13 @@ export function redirectThinkingText(blocks: any[], hasThinkingMode: boolean): v
       }
 
       if (targetIdx >= 0) {
-        // Append to the target thinking block
-        blocks[targetIdx].thinking = (blocks[targetIdx].thinking || "") + "\n" + text;
+        if (targetIdx < idx) {
+          // Target thinking block is before the text — append to preserve order
+          blocks[targetIdx].thinking = (blocks[targetIdx].thinking || "") + "\n" + text;
+        } else {
+          // Target thinking block is after the text — prepend to preserve order
+          blocks[targetIdx].thinking = text + "\n" + (blocks[targetIdx].thinking || "");
+        }
         // Remove the text block
         blocks.splice(idx, 1);
       }
