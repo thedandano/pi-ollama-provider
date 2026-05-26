@@ -11,7 +11,6 @@ import {
   getErrors,
   clearLog,
   formatStatusLine,
-  type LogEntry,
 } from "../extensions/pi-ollama-provider/log-buffer.js";
 
 describe("log-buffer", () => {
@@ -176,6 +175,15 @@ describe("log-buffer", () => {
       expect(formatStatusLine()).toBe("⚠ ollama: discarding v1 cache");
     });
 
+    it("summarizes multiple warnings with count", () => {
+      logWarn("cache", "discarding v1 cache");
+      logWarn("cloud", "no tool-capable models found");
+      const status = formatStatusLine();
+      expect(status).toContain("2 warnings");
+      expect(status).toContain("discarding v1 cache");
+      expect(status).toContain("no tool-capable models found");
+    });
+
     it("summarizes multiple entries", () => {
       logError("local", "server unreachable");
       logError("cloud", "auth failed");
@@ -204,11 +212,11 @@ describe("log-buffer", () => {
       expect(status).not.toContain("more");
     });
 
-    it("uses singular 'error' for one error among warnings", () => {
+    it("uses 'issues' for mixed errors and warnings", () => {
       logError("local", "server unreachable");
       logWarn("cache", "discarding cache");
       const status = formatStatusLine();
-      expect(status).toContain("1 error");
+      expect(status).toContain("2 issues");
       expect(status).toContain("server unreachable");
       expect(status).toContain("discarding cache");
     });
