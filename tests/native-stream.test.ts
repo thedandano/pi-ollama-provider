@@ -690,16 +690,35 @@ describe("mergeAdjacentBlocks", () => {
     expect(blocks[0].text).toBe("alone");
   });
 
-  it("absorbs thinking block between text blocks regardless of size", () => {
+  it("embeds sandwiched thinking fragment into merged text", () => {
+    // Sandwiched thinking fragments are tiny sentence-splitting artifacts.
+    // They get embedded inline into the merged text block.
     const blocks = [
       { type: "text", text: "Hello " },
-      { type: "thinking", thinking: "This is a long thoughtful analysis..." },
+      { type: "thinking", thinking: "..." },
       { type: "text", text: "world!" },
     ];
     mergeAdjacentBlocks(blocks);
     expect(blocks).toHaveLength(1);
     expect(blocks[0].type).toBe("text");
-    expect(blocks[0].text).toBe("Hello world!");
+    expect(blocks[0].text).toBe("Hello ...world!");
+  });
+
+  it("embeds sandwiched thinking even when a prior thinking block exists", () => {
+    // The fragment is embedded into text — NOT merged into distant thinking blocks
+    // (merging into blocks[i-2] would change chronological ordering).
+    const blocks = [
+      { type: "thinking", thinking: "Step 1: " },
+      { type: "text", text: "I appreciate" },
+      { type: "thinking", thinking: "." },
+      { type: "text", text: " the request!" },
+    ];
+    mergeAdjacentBlocks(blocks);
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0].type).toBe("thinking");
+    expect(blocks[0].thinking).toBe("Step 1: ");
+    expect(blocks[1].type).toBe("text");
+    expect(blocks[1].text).toBe("I appreciate. the request!");
   });
 
   it("does not absorb thinking block at end without trailing text", () => {
@@ -711,7 +730,6 @@ describe("mergeAdjacentBlocks", () => {
     expect(blocks).toHaveLength(2); // unchanged - no trailing text to merge with
   });
 });
-
 // ════════════════════════════════════════════════════════════════
 // Content block ordering (regression: thinking-first models)
 // ════════════════════════════════════════════════════════════════
@@ -870,7 +888,7 @@ describe("Content block ordering", () => {
 
   it("should handle text before thinking (standard order)", async () => {
     // Some models output text first, then thinking in a follow-up
-    // After merge pass 2, the thinking between text gets absorbed
+    // The thinking block between text blocks is preserved (not dropped)
     mockFetchWithNDJSON([
       JSON.stringify({ model: "test", created_at: "", message: { role: "assistant", content: "I am thinking" }, done: false }),
       JSON.stringify({ model: "test", created_at: "", message: { role: "assistant", content: "", thinking: "actually let me reconsider" }, done: false }),
@@ -897,10 +915,14 @@ describe("Content block ordering", () => {
 
     if (doneEvent) {
       const content = doneEvent.message.content;
-      // Pass 2 absorbs the thinking sandwiched between text → 1 merged text block
+      // Sandwiched thinking fragment is embedded inline into merged text:
+      // text("I am thinking") + thinking("actually let me reconsider") + text("Final answer")
+      // → text("I am thinkingactually let me reconsiderFinal answer")
       expect(content.length).toBe(1);
       expect(content[0].type).toBe("text");
-      expect(content[0].text).toBe("I am thinkingFinal answer");
+      expect(content[0].text).toContain("I am thinking");
+      expect(content[0].text).toContain("Final answer");
+      expect(content[0].text).toContain("actually let me reconsider");
     }
   });
 
