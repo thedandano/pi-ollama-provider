@@ -11,12 +11,12 @@
  * (which provides `ctx` with `ctx.ui.setStatus`).
  *
  * Severity levels:
- *   - "warn": shown in status bar and auto-cleared after 8 seconds
- *   - "error": shown in status bar persistently until cleared
+ *   - "warn": shown in status bar and /ollama-status
+ *   - "error": shown in status bar and /ollama-status
  *
- * The status bar is refreshed on each session_start event. Warnings and
- * errors from the previous session are cleared at that point so stale
- * entries don't persist indefinitely.
+ * The ring buffer caps at MAX_ENTRIES (20) so stale entries are
+ * naturally discarded as new entries arrive. The status bar is
+ * refreshed on each session_start event.
  */
 
 // ── types ──
@@ -52,8 +52,8 @@ function addEntry(level: LogLevel, source: LogSource, message: string): void {
 // ── public API ──
 
 /**
- * Log a warning. Shown in status bar on session_start and auto-cleared
- * after 8 seconds. Also visible in /ollama-status.
+ * Log a warning. Shown in status bar on session_start and visible
+ * in /ollama-status.
  */
 export function logWarn(source: LogSource, message: string): void {
   addEntry("warn", source, message);
@@ -61,7 +61,7 @@ export function logWarn(source: LogSource, message: string): void {
 
 /**
  * Log an error. Shown persistently in status bar and in /ollama-status.
- * Not auto-cleared — remains until the next session_start clears the buffer.
+ * Remains in the ring buffer until overwritten by newer entries.
  */
 export function logError(source: LogSource, message: string): void {
   addEntry("error", source, message);
@@ -97,11 +97,17 @@ export function clearLog(): void {
  *
  * Returns `undefined` if there are no errors or warnings to show.
  *
+ * Formatting rules:
+ *   - Single entry → show the message directly (no count prefix)
+ *   - Multiple errors-only → "N errors — msg1, msg2"
+ *   - Multiple warnings-only → "N warnings — msg1, msg2"
+ *   - Mixed errors + warnings → "N issues — msg1, msg2"
+ *
  * Examples:
- *   "⚠ ollama: local server unreachable"
- *   "⚠ ollama: 2 errors — local unreachable, cloud auth failed"
- *   "⚠ ollama: 1 warning — cache format unknown"
- *   "⚠ ollama: 3 issues — local unreachable, cloud auth failed, +1 more"
+ *   "⚠ ollama: local server unreachable"                    (single entry)
+ *   "⚠ ollama: 2 errors — local unreachable, auth failed"  (errors-only)
+ *   "⚠ ollama: 2 warnings — discarding cache, slow model" (warnings-only)
+ *   "⚠ ollama: 3 issues — local unreachable, auth failed, +1 more" (mixed)
  */
 export function formatStatusLine(): string | undefined {
   const entries = getRecentEntries(3);

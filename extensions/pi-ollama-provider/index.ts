@@ -69,7 +69,7 @@ import { registerCloudProvider, registerCloudTools } from "./cloud.js";
 import { streamNativeChat } from "./native-stream.js";
 import { isOllamaContextOverflow as isOverflowFromSafety, calculateNumCtx, getDefaultKeepAlive } from "./context-safety.js";
 import { readSettings, writeSettings, handleStatusCommand, handleInfoCommand, handlePullCommand, runSetupWizard, type OllamaSettings } from "./commands.js";
-import { logError, formatStatusLine, clearLog } from "./log-buffer.js";
+import { formatStatusLine } from "./log-buffer.js";
 
 // Re-export for testing
 export { resolveConfig, resolveConfigAsync, readOllamaAuthFromJson, describeAuthSource, DEFAULT_LOCAL_URL, DEFAULT_CLOUD_URL } from "./auth.js";
@@ -447,17 +447,13 @@ export default async function (pi: ExtensionAPI) {
   pi.on("model_select", handleModelSelect(pi, settings));
 
   // ── Show buffered errors/warnings in status bar on session start ──
-  // Re-evaluate status each session: clear stale entries from previous sessions
-  // so resolved errors don't persist. New errors during this session will
-  // be buffered and shown on the next session_start or /ollama-status.
+  // Re-evaluate status each session. The ring buffer (MAX_ENTRIES=20) naturally
+  // discards old entries, and /ollama-status shows only the last 5, so stale
+  // entries from previous sessions are not a persistent problem.
 
   pi.on("session_start", (_event, ctx) => {
-    // Re-evaluate current status (stale errors from last session already cleared)
     const status = formatStatusLine();
     ctx.ui.setStatus("ollama", status ?? undefined);
-
-    // Clear the buffer for the new session — resolved conditions won't linger
-    clearLog();
   });
 
   // Wait for local provider to be ready if no cache was available

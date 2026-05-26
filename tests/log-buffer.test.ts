@@ -11,7 +11,6 @@ import {
   getErrors,
   clearLog,
   formatStatusLine,
-  type LogEntry,
 } from "../extensions/pi-ollama-provider/log-buffer.js";
 
 describe("log-buffer", () => {
@@ -174,6 +173,15 @@ describe("log-buffer", () => {
     it("returns a single warning message", () => {
       logWarn("cache", "discarding v1 cache");
       expect(formatStatusLine()).toBe("⚠ ollama: discarding v1 cache");
+    });
+
+    it("summarizes multiple warnings with count", () => {
+      logWarn("cache", "discarding v1 cache");
+      logWarn("cloud", "no tool-capable models found");
+      const status = formatStatusLine();
+      expect(status).toContain("2 warnings");
+      expect(status).toContain("discarding v1 cache");
+      expect(status).toContain("no tool-capable models found");
     });
 
     it("summarizes multiple entries", () => {

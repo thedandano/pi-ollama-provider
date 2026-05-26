@@ -19,7 +19,7 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-cod
 import { readFileSync, writeFileSync, existsSync, renameSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { homedir, tmpdir } from "node:os";
-import { logWarn, logError, getRecentEntries } from "./log-buffer.js";
+import { logWarn, getRecentEntries } from "./log-buffer.js";
 
 const SETTINGS_PATH = join(homedir(), ".pi", "agent", "settings.json");
 
