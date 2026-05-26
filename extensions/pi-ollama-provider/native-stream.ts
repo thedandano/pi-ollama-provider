@@ -303,9 +303,11 @@ export function mergeAdjacentBlocks(blocks: any[]): void {
     }
   }
 
-  // Pass 2: handle thinking fragments sandwiched between two text blocks.
-  // These are tiny artifacts from sentence-splitting (not real reasoning),
-  // so we embed them inline into the merged text to preserve the sentence.
+  // Pass 2: merge text blocks separated by a thinking block.
+  // The thinking block is preserved — it is NOT inlined into the text.
+  // Previous versions incorrectly embedded thinking content into visible text,
+  // causing thinking to leak into user-visible responses.
+  // Now we just merge the surrounding text blocks on either side of the thinking.
   for (let i = blocks.length - 1; i > 0; i--) {
     const curr = blocks[i];
     const prev = blocks[i - 1];
@@ -313,21 +315,15 @@ export function mergeAdjacentBlocks(blocks: any[]): void {
     if (prev.type === "text" && curr.type === "thinking") {
       const next = blocks[i + 1];
       if (next && next.type === "text") {
-        // e.g. text "I appreciate" + thinking "." + text " the request!"
-        // Embed the thinking fragment into the merged text.
-        const thinkingContent = (curr.thinking || "").trim();
-        if (thinkingContent) {
-          prev.text = (prev.text || "") + thinkingContent;
-        }
-        // Merge the trailing text block
+        // Merge the two text blocks around the thinking block
         prev.text = (prev.text || "") + (next.text || "");
-        // Remove thinking block + trailing text block
-        blocks.splice(i, 2);
+        // Remove only the trailing text block (keep thinking in place)
+        blocks.splice(i + 1, 1);
       }
     }
   }
 
-  // Pass 3: re-merge any adjacent thinking blocks created by pass 2
+  // Pass 3: re-merge any adjacent thinking blocks
   for (let i = blocks.length - 1; i > 0; i--) {
     const curr = blocks[i];
     const prev = blocks[i - 1];
