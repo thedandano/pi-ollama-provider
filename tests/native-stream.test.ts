@@ -250,6 +250,73 @@ describe("convertMessages", () => {
     expect(result[0].tool_calls).toHaveLength(1);
     expect(result[0].tool_calls![0].function.name).toBe("read_file");
   });
+  it("extracts thinking from assistant message content blocks", () => {
+    const messages = [
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "Let me analyze this step by step." },
+          { type: "text", text: "Here is my answer." },
+        ],
+      },
+      { role: "user", content: "Thanks!" },
+    ];
+    const result = convertMessages(messages);
+    // Assistant message should have thinking field
+    expect(result[0].thinking).toBe("Let me analyze this step by step.");
+    expect(result[0].content).toBe("Here is my answer.");
+  });
+
+  it("joins multiple thinking blocks from assistant content", () => {
+    const messages = [
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "Step 1: " },
+          { type: "text", text: "Some text" },
+          { type: "thinking", thinking: "Step 2" },
+        ],
+      },
+    ];
+    const result = convertMessages(messages);
+    expect(result[0].thinking).toBe("Step 1: \nStep 2");
+    expect(result[0].content).toBe("Some text");
+  });
+
+  it("includes thinking field in assistant message with tool_calls", () => {
+    const messages = [
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "I need to read the file." },
+          { type: "text", text: "Let me read that." },
+          { type: "toolCall", id: "tool_0", name: "read", arguments: { path: "/tmp/test" } },
+        ],
+        tool_calls: [
+          { function: { name: "read", arguments: { path: "/tmp/test" } } },
+        ],
+      },
+    ];
+    const result = convertMessages(messages);
+    expect(result[0].thinking).toBe("I need to read the file.");
+    expect(result[0].content).toBe("Let me read that.");
+    expect(result[0].tool_calls).toHaveLength(1);
+  });
+
+  it("omits thinking field when no thinking blocks exist", () => {
+    const messages = [
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "Just a regular response." },
+        ],
+      },
+    ];
+    const result = convertMessages(messages);
+    expect(result[0].thinking).toBeUndefined();
+    expect(result[0].content).toBe("Just a regular response.");
+  });
+
 });
 
 // ════════════════════════════════════════════════════════════════
