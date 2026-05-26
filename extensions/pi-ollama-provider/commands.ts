@@ -181,10 +181,6 @@ export function readSettings(): OllamaSettings {
 
     const { validated, issues } = validateSettings(ollamaSection);
 
-    for (const issue of issues) {
-      console.log(`[ollama] Settings warning: ${issue.message}`);
-    }
-
     return validated;
   } catch {
     return { ...DEFAULT_SETTINGS };
@@ -199,9 +195,6 @@ export function writeSettings(settings: OllamaSettings): void {
   try {
     // Validate before writing
     const { validated, issues } = validateSettings(settings);
-    for (const issue of issues) {
-      console.log(`[ollama] Settings warning: ${issue.message}`);
-    }
 
     let existing: Record<string, unknown> = {};
     try {
@@ -225,10 +218,8 @@ export function writeSettings(settings: OllamaSettings): void {
         if (existsSync(tmpDir)) rmSync(tmpDir, { recursive: true, force: true });
       } catch {}
     }
-  } catch (err) {
-    console.log(
-      `[ollama] settings write failed: ${err instanceof Error ? err.message : String(err)}`,
-    );
+  } catch {
+    // settings write failed — non-fatal
   }
 }
 

@@ -132,9 +132,8 @@ function createNativeStreamSimple(
       ollamaOptions,
       signal: options?.signal,
       keepAlive: settings.keepAlive || getDefaultKeepAlive(),
-    }).catch((err) => {
+    }).catch(() => {
       // Errors are already pushed to the stream via error events
-      console.error("[ollama] Stream error:", err);
     });
 
     return stream;
@@ -223,9 +222,7 @@ async function registerLocalProvider(pi: ExtensionAPI, settings: OllamaSettings)
   // Update cache for instant next startup (raw API data)
   writeModelCache(result.rawCacheData);
 
-  console.log(
-    `[ollama] ${modelConfigs.length} models registered (streaming: ${settings.streamingMode || "native"})`,
-  );
+
 }
 
 /**
@@ -291,7 +288,6 @@ function registerFromCache(pi: ExtensionAPI): boolean {
     });
   }
 
-  console.log(`[ollama] ${modelConfigs.length} models from cache (v${cached.version}, ${Math.round((Date.now() - cached.timestamp) / 3600000)}h old)`);
   return true;
 }
 
@@ -307,17 +303,13 @@ function handleModelSelect(
     const modelId = event.model?.id;
     if (!modelId || localModelNames.has(modelId)) return;
 
-    // Auto-pull disabled?
-    if (settings.autoPull === false) {
-      console.log(`[ollama] auto-pull disabled; ${modelId} not available locally`);
-      return;
-    }
+    if (settings.autoPull === false) return;
 
     // Interactive confirmation for large downloads
     try {
       await handlePullCommand(modelId, event, getOllamaHost(), currentConfig.apiKey);
-    } catch (err) {
-      console.error(`[ollama] auto-pull failed: ${modelId}: ${err}`);
+    } catch {
+      // Auto-pull failed silently
     }
   };
 }
@@ -330,11 +322,7 @@ export default async function (pi: ExtensionAPI) {
   // Resolve config with sync fallback for immediate cache registration
   currentConfig = resolveConfig();
 
-  // Log auth source at startup
   const authSource = describeAuthSource(currentConfig);
-  if (currentConfig.apiKey !== "ollama") {
-    console.log(`[ollama] API key from ${authSource}`);
-  }
 
   // Read extension settings
   const settings = readSettings();
@@ -356,9 +344,7 @@ export default async function (pi: ExtensionAPI) {
   let localProviderReady: Promise<void>;
   if (!hasCache) {
     // No cache — try to register immediately from API
-    localProviderReady = registerLocalProvider(pi, settings).catch(() => {
-      console.log("[ollama] API discovery failed, no models available");
-    });
+    localProviderReady = registerLocalProvider(pi, settings).catch(() => {});
   } else {
     // Has cache — refresh in background
     localProviderReady = registerLocalProvider(pi, settings);
@@ -369,12 +355,9 @@ export default async function (pi: ExtensionAPI) {
   if (currentConfig.mode === "cloud" || currentConfig.apiKey !== "ollama") {
     registerCloudProvider(pi, currentConfig.apiKey).then((count) => {
       if (count > 0) {
-        // Register web tools regardless of model count — they work with any cloud API key
         registerCloudTools(pi, currentConfig.apiKey);
       }
-    }).catch(() => {
-      console.log("[ollama-cloud] registration failed (cloud may be unreachable)");
-    });
+    }).catch(() => {});
 
     // Cloud-only mode without cache — API registration is attempted above
   }

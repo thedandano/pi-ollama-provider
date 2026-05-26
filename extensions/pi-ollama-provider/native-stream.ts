@@ -618,7 +618,6 @@ export async function streamNativeChat(
     if (output.content.length === 0 && chunks.length > 0) {
       if (isGhostTokenStream(chunks)) {
         // Retry with stream: false
-        console.log("[ollama] Ghost token detected — retrying with stream: false");
         await retryNonStreaming(baseUrl, headers, body, stream, output);
         return;
       }

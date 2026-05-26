@@ -315,7 +315,7 @@ export function readModelCache(): OllamaModelCache | null {
 
     // v1 format: flat array of OllamaModelConfig — discard gracefully
     if (Array.isArray(parsed)) {
-      console.log("[ollama] discarding v1 cache (upgrading to v2 raw format)");
+      // v1 cache discarded silently
       return null;
     }
 
@@ -325,7 +325,7 @@ export function readModelCache(): OllamaModelCache | null {
     }
 
     // Unknown format — discard
-    console.log(`[ollama] discarding unknown cache format (version=${parsed.version})`);
+    // Unknown cache format discarded silently
     return null;
   } catch {
     return null;
@@ -353,10 +353,8 @@ export function writeModelCache(cache: OllamaModelCache): void {
       ),
       "utf-8",
     );
-  } catch (err) {
-    console.log(
-      `[ollama] cache write failed: ${err instanceof Error ? err.message : String(err)}`,
-    );
+  } catch {
+    // Cache write failed silently
   }
 }
 
@@ -459,10 +457,8 @@ export async function fetchLocalModels(
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     return data.models || [];
-  } catch (err) {
-    console.log(
-      `[ollama] unavailable (${baseUrl}): ${err instanceof Error ? err.message : String(err)}`,
-    );
+  } catch {
+    // Ollama server unavailable
     return [];
   }
 }
@@ -566,7 +562,7 @@ export async function discoverModels(
   // Check which models are currently loaded (optional, best-effort)
   const loadedModels = await fetchLoadedModels(baseUrl, apiKey);
 
-  console.log(`[ollama] ${tagsModels.length} models discovered`);
+  // Models discovered silently
 
   const modelConfigs: OllamaModelConfig[] = tagsModels.map((model) => {
     const details = detailResults.get(model.name);
