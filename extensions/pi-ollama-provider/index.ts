@@ -344,6 +344,7 @@ export default async function (pi: ExtensionAPI) {
   let localProviderReady: Promise<void>;
   if (!hasCache) {
     // No cache — try to register immediately from API
+    // Discovery failure is non-fatal: cache or retry on next startup
     localProviderReady = registerLocalProvider(pi, settings).catch(() => {});
   } else {
     // Has cache — refresh in background
@@ -357,7 +358,9 @@ export default async function (pi: ExtensionAPI) {
       if (count > 0) {
         registerCloudTools(pi, currentConfig.apiKey);
       }
-    }).catch(() => {});
+    }).catch(() => {
+      // Cloud registration failure is non-fatal: local models still work
+    });
 
     // Cloud-only mode without cache — API registration is attempted above
   }

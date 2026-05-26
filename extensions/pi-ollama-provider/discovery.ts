@@ -354,7 +354,8 @@ export function writeModelCache(cache: OllamaModelCache): void {
       "utf-8",
     );
   } catch {
-    // Cache write failed silently
+    // Non-fatal: cache is for faster subsequent startups, not correctness.
+    // A failed write just means the next launch will fetch fresh data from the API.
   }
 }
 
@@ -458,7 +459,7 @@ export async function fetchLocalModels(
     const data = await res.json();
     return data.models || [];
   } catch {
-    // Ollama server unavailable
+    // Ollama server may be offline or unreachable; return empty list gracefully.
     return [];
   }
 }

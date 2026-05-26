@@ -179,7 +179,7 @@ export function readSettings(): OllamaSettings {
     const parsed = JSON.parse(data);
     const ollamaSection = parsed?.ollama ?? {};
 
-    const { validated, issues } = validateSettings(ollamaSection);
+    const { validated } = validateSettings(ollamaSection);
 
     return validated;
   } catch {
@@ -194,7 +194,7 @@ export function readSettings(): OllamaSettings {
 export function writeSettings(settings: OllamaSettings): void {
   try {
     // Validate before writing
-    const { validated, issues } = validateSettings(settings);
+    const { validated } = validateSettings(settings);
 
     let existing: Record<string, unknown> = {};
     try {
@@ -219,7 +219,8 @@ export function writeSettings(settings: OllamaSettings): void {
       } catch {}
     }
   } catch {
-    // settings write failed — non-fatal
+    // Settings write is non-fatal: the extension works fine with in-memory defaults,
+    // and the next successful write will persist any changes.
   }
 }
 
