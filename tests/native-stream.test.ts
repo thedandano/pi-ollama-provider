@@ -690,29 +690,23 @@ describe("mergeAdjacentBlocks", () => {
     expect(blocks[0].text).toBe("alone");
   });
 
-  it("preserves thinking block sandwiched between text blocks", () => {
-    // Previously, the thinking block was dropped. Now it is preserved.
-    // When there's no adjacent thinking block to merge into,
-    // the thinking content is embedded in the merged text with newlines.
+  it("embeds sandwiched thinking fragment into merged text", () => {
+    // Sandwiched thinking fragments are tiny sentence-splitting artifacts.
+    // They get embedded inline into the merged text block.
     const blocks = [
       { type: "text", text: "Hello " },
-      { type: "thinking", thinking: "This is a long thoughtful analysis..." },
+      { type: "thinking", thinking: "..." },
       { type: "text", text: "world!" },
     ];
     mergeAdjacentBlocks(blocks);
-    // Thinking content is preserved — either embedded in text or kept as separate block
-    expect(blocks.length).toBeGreaterThanOrEqual(1);
-    // The merged text should contain both text fragments
-    const textContent = blocks.filter((b: any) => b.type === "text").map((b: any) => b.text).join("");
-    expect(textContent).toContain("Hello ");
-    expect(textContent).toContain("world!");
-    // The thinking content should NOT be lost
-    const thinkingContent = blocks.filter((b: any) => b.type === "thinking").map((b: any) => b.thinking).join("");
-    const allContent = textContent + thinkingContent;
-    expect(allContent).toContain("This is a long thoughtful analysis...");
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].type).toBe("text");
+    expect(blocks[0].text).toBe("Hello ...world!");
   });
 
-  it("merges sandwiched thinking into adjacent thinking block", () => {
+  it("embeds sandwiched thinking even when a prior thinking block exists", () => {
+    // The fragment is embedded into text — NOT merged into distant thinking blocks
+    // (merging into blocks[i-2] would change chronological ordering).
     const blocks = [
       { type: "thinking", thinking: "Step 1: " },
       { type: "text", text: "I appreciate" },
@@ -720,13 +714,11 @@ describe("mergeAdjacentBlocks", () => {
       { type: "text", text: " the request!" },
     ];
     mergeAdjacentBlocks(blocks);
-    // Pass 2: text "I appreciate" + thinking "." + text " the request!" → thinking "." merged into previous thinking block
-    // Result: thinking("Step 1: .") + text("I appreciate the request!")
-    expect(blocks.length).toBe(2);
+    expect(blocks).toHaveLength(2);
     expect(blocks[0].type).toBe("thinking");
-    expect(blocks[0].thinking).toBe("Step 1: .");
+    expect(blocks[0].thinking).toBe("Step 1: ");
     expect(blocks[1].type).toBe("text");
-    expect(blocks[1].text).toBe("I appreciate the request!");
+    expect(blocks[1].text).toBe("I appreciate. the request!");
   });
 
   it("does not absorb thinking block at end without trailing text", () => {
@@ -923,15 +915,13 @@ describe("Content block ordering", () => {
 
     if (doneEvent) {
       const content = doneEvent.message.content;
-      // Thinking between text blocks is no longer dropped:
+      // Sandwiched thinking fragment is embedded inline into merged text:
       // text("I am thinking") + thinking("actually let me reconsider") + text("Final answer")
-      // → text("I am thinking\nactually let me reconsider\nFinal answer")
-      // (thinking content is embedded in text to avoid data loss)
+      // → text("I am thinkingactually let me reconsiderFinal answer")
       expect(content.length).toBe(1);
       expect(content[0].type).toBe("text");
       expect(content[0].text).toContain("I am thinking");
       expect(content[0].text).toContain("Final answer");
-      // The thinking content is preserved, not dropped
       expect(content[0].text).toContain("actually let me reconsider");
     }
   });

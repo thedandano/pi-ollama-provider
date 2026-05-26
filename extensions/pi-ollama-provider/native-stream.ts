@@ -273,7 +273,7 @@ export function convertTools(
 
 /**
  * Merge adjacent same-type content blocks and handle interleaved
- * thinking blocks between text blocks.
+ * thinking fragments between text blocks.
  *
  * GLM outputs thinking tokens in a long contiguous block, then text.
  * But occasionally it emits a trailing thinking fragment after text
@@ -282,9 +282,11 @@ export function convertTools(
  *
  * Three passes:
  * 1. Merge adjacent same-type blocks (text+text, thinking+thinking)
- * 2. Merge sandwiched thinking blocks into an adjacent thinking block
- *    or keep them as-is (never drop thinking content)
- * 3. Re-merge any adjacent same-type blocks created by pass 2
+ * 2. When a thinking block is sandwiched between two text blocks,
+ *    merge the text blocks and embed the thinking content inline
+ *    (these are tiny fragments from sentence-splitting, not real
+ *    thinking). The thinking block is removed from the array.
+ * 3. Re-merge any adjacent thinking blocks created by pass 2.
  */
 export function mergeAdjacentBlocks(blocks: any[]): void {
   // Pass 1: merge adjacent same-type blocks
@@ -301,9 +303,9 @@ export function mergeAdjacentBlocks(blocks: any[]): void {
     }
   }
 
-  // Pass 2: handle thinking blocks sandwiched between text blocks
-  // Instead of dropping thinking content, merge it into an existing
-  // thinking block or keep it as-is.
+  // Pass 2: handle thinking fragments sandwiched between two text blocks.
+  // These are tiny artifacts from sentence-splitting (not real reasoning),
+  // so we embed them inline into the merged text to preserve the sentence.
   for (let i = blocks.length - 1; i > 0; i--) {
     const curr = blocks[i];
     const prev = blocks[i - 1];
@@ -311,32 +313,21 @@ export function mergeAdjacentBlocks(blocks: any[]): void {
     if (prev.type === "text" && curr.type === "thinking") {
       const next = blocks[i + 1];
       if (next && next.type === "text") {
-        // GLM sometimes emits: text "I appreciate" + thinking "." + text " the request!"
-        // This is a fragmented sentence — merge into one text block,
-        // but PRESERVE the thinking content by appending to an adjacent thinking block.
-        const thinkingContent = curr.thinking || "";
-
-        // Look for a nearby thinking block to merge into
-        const prevThinking = i >= 2 && blocks[i - 2]?.type === "thinking" ? blocks[i - 2] : null;
-        if (prevThinking && thinkingContent) {
-          // Merge thinking into the previous thinking block
-          prevThinking.thinking = (prevThinking.thinking || "") + thinkingContent;
-        } else {
-          // No adjacent thinking block — convert the sandwiched thinking into
-          // a newline + content within the merged text (better than dropping it)
-          if (thinkingContent.trim()) {
-            prev.text = (prev.text || "") + "\n" + thinkingContent + "\n";
-          }
+        // e.g. text "I appreciate" + thinking "." + text " the request!"
+        // Embed the thinking fragment into the merged text.
+        const thinkingContent = (curr.thinking || "").trim();
+        if (thinkingContent) {
+          prev.text = (prev.text || "") + thinkingContent;
         }
-
-        // Merge the two text blocks, removing the thinking block
+        // Merge the trailing text block
         prev.text = (prev.text || "") + (next.text || "");
-        blocks.splice(i, 2); // remove thinking + next text
+        // Remove thinking block + trailing text block
+        blocks.splice(i, 2);
       }
     }
   }
 
-  // Pass 3: re-merge any adjacent same-type blocks created by pass 2
+  // Pass 3: re-merge any adjacent thinking blocks created by pass 2
   for (let i = blocks.length - 1; i > 0; i--) {
     const curr = blocks[i];
     const prev = blocks[i - 1];
