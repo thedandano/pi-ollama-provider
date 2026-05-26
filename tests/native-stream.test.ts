@@ -16,6 +16,7 @@ import {
   isOllamaContextOverflow,
   streamNativeChat,
   mergeAdjacentBlocks,
+  redirectThinkingText,
   type OllamaChatChunk,
   type OllamaToolCall,
 } from "../extensions/pi-ollama-provider/native-stream.js";
@@ -690,16 +691,43 @@ describe("mergeAdjacentBlocks", () => {
     expect(blocks[0].text).toBe("alone");
   });
 
-  it("absorbs thinking block between text blocks regardless of size", () => {
+  it("preserves thinking block sandwiched between text blocks", () => {
+    // Previously, the thinking block was dropped. Now it is preserved.
+    // When there's no adjacent thinking block to merge into,
+    // the thinking content is embedded in the merged text with newlines.
     const blocks = [
       { type: "text", text: "Hello " },
       { type: "thinking", thinking: "This is a long thoughtful analysis..." },
       { type: "text", text: "world!" },
     ];
     mergeAdjacentBlocks(blocks);
-    expect(blocks).toHaveLength(1);
-    expect(blocks[0].type).toBe("text");
-    expect(blocks[0].text).toBe("Hello world!");
+    // Thinking content is preserved — either embedded in text or kept as separate block
+    expect(blocks.length).toBeGreaterThanOrEqual(1);
+    // The merged text should contain both text fragments
+    const textContent = blocks.filter((b: any) => b.type === "text").map((b: any) => b.text).join("");
+    expect(textContent).toContain("Hello ");
+    expect(textContent).toContain("world!");
+    // The thinking content should NOT be lost
+    const thinkingContent = blocks.filter((b: any) => b.type === "thinking").map((b: any) => b.thinking).join("");
+    const allContent = textContent + thinkingContent;
+    expect(allContent).toContain("This is a long thoughtful analysis...");
+  });
+
+  it("merges sandwiched thinking into adjacent thinking block", () => {
+    const blocks = [
+      { type: "thinking", thinking: "Step 1: " },
+      { type: "text", text: "I appreciate" },
+      { type: "thinking", thinking: "." },
+      { type: "text", text: " the request!" },
+    ];
+    mergeAdjacentBlocks(blocks);
+    // Pass 2: text "I appreciate" + thinking "." + text " the request!" → thinking "." merged into previous thinking block
+    // Result: thinking("Step 1: .") + text("I appreciate the request!")
+    expect(blocks.length).toBe(2);
+    expect(blocks[0].type).toBe("thinking");
+    expect(blocks[0].thinking).toBe("Step 1: .");
+    expect(blocks[1].type).toBe("text");
+    expect(blocks[1].text).toBe("I appreciate the request!");
   });
 
   it("does not absorb thinking block at end without trailing text", () => {
@@ -709,6 +737,120 @@ describe("mergeAdjacentBlocks", () => {
     ];
     mergeAdjacentBlocks(blocks);
     expect(blocks).toHaveLength(2); // unchanged - no trailing text to merge with
+  });
+});
+
+// ════════════════════════════════════════════════════════════════
+// redirectThinkingText
+// ════════════════════════════════════════════════════════════════
+
+describe("redirectThinkingText", () => {
+  it("redirects short 'Let me...' text blocks into thinking", () => {
+    const blocks = [
+      { type: "thinking", thinking: "I need to search for something." },
+      { type: "text", text: "Let me search for that." },
+      { type: "toolCall", id: "tool_0", name: "brave_search", arguments: { query: "test" } },
+    ];
+    redirectThinkingText(blocks, true);
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0].type).toBe("thinking");
+    expect(blocks[0].thinking).toContain("I need to search for something.");
+    expect(blocks[0].thinking).toContain("Let me search for that.");
+    expect(blocks[1].type).toBe("toolCall");
+  });
+
+  it("redirects 'Now let...' text blocks into thinking", () => {
+    const blocks = [
+      { type: "thinking", thinking: "Analyzing the data." },
+      { type: "text", text: "Now let me check the versions available." },
+      { type: "toolCall", id: "tool_0", name: "bash", arguments: { command: "npm ls" } },
+    ];
+    redirectThinkingText(blocks, true);
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0].type).toBe("thinking");
+    expect(blocks[0].thinking).toContain("Now let me check the versions available.");
+  });
+
+  it("converts lone thinking-literal text to thinking block when no existing thinking", () => {
+    const blocks = [
+      { type: "text", text: "Good, the build passed. Let me continue." },
+      { type: "toolCall", id: "tool_0", name: "bash", arguments: { command: "ls" } },
+    ];
+    redirectThinkingText(blocks, true);
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0].type).toBe("thinking");
+    expect(blocks[0].thinking).toBe("Good, the build passed. Let me continue.");
+  });
+
+  it("does not redirect long text blocks", () => {
+    const longText = "This is a very long response that exceeds the maximum threshold for thinking-literal detection. It contains detailed information about the topic at hand and is clearly meant for the user to read, not internal reasoning.";
+    const blocks = [
+      { type: "thinking", thinking: "Let me answer this." },
+      { type: "text", text: longText },
+    ];
+    redirectThinkingText(blocks, true);
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0].type).toBe("thinking");
+    expect(blocks[1].type).toBe("text"); // not redirected
+  });
+
+  it("does not redirect substantive user-facing text", () => {
+    const blocks = [
+      { type: "thinking", thinking: "I'll write the code." },
+      { type: "text", text: "Here's the complete solution to your problem:\n\n```typescript\nconsole.log('hello');\n```" },
+    ];
+    redirectThinkingText(blocks, true);
+    expect(blocks).toHaveLength(2);
+    expect(blocks[1].type).toBe("text"); // not redirected
+  });
+
+  it("does not redirect when thinkingMode is false", () => {
+    const blocks = [
+      { type: "text", text: "Let me check that for you." },
+      { type: "toolCall", id: "tool_0", name: "bash", arguments: { command: "ls" } },
+    ];
+    redirectThinkingText(blocks, false);
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0].type).toBe("text"); // unchanged
+  });
+
+  it("merges adjacent thinking blocks after redirection", () => {
+    const blocks = [
+      { type: "thinking", thinking: "First thought." },
+      { type: "text", text: "Now I'll check the file." },
+      { type: "toolCall", id: "tool_0", name: "read", arguments: { path: "/tmp/test" } },
+    ];
+    redirectThinkingText(blocks, true);
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0].type).toBe("thinking");
+    expect(blocks[0].thinking).toBe("First thought.\nNow I'll check the file.");
+  });
+
+  it("redirects multiple thinking-literal text blocks", () => {
+    const blocks = [
+      { type: "text", text: "Let me start by checking the environment." },
+      { type: "toolCall", id: "tool_0", name: "bash", arguments: { command: "which node" } },
+      { type: "text", text: "Good, node is available. Now let me check npm." },
+      { type: "toolCall", id: "tool_1", name: "bash", arguments: { command: "which npm" } },
+    ];
+    redirectThinkingText(blocks, true);
+    // Both text blocks should be converted to thinking
+    expect(blocks.every(b => b.type !== "text")).toBe(true);
+    // Two thinking blocks separated by a toolCall — they stay separate
+    expect(blocks.filter(b => b.type === "thinking").length).toBe(2);
+    expect(blocks[0].type).toBe("thinking");
+    expect(blocks[0].thinking).toBe("Let me start by checking the environment.");
+    expect(blocks[2].type).toBe("thinking");
+    expect(blocks[2].thinking).toBe("Good, node is available. Now let me check npm.");
+  });
+
+  it("preserves text that doesn't match thinking-literal patterns", () => {
+    const blocks = [
+      { type: "text", text: "Here is the final answer to your question." },
+    ];
+    redirectThinkingText(blocks, true);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].type).toBe("text"); // preserved
   });
 });
 
@@ -870,7 +1012,7 @@ describe("Content block ordering", () => {
 
   it("should handle text before thinking (standard order)", async () => {
     // Some models output text first, then thinking in a follow-up
-    // After merge pass 2, the thinking between text gets absorbed
+    // The thinking block between text blocks is preserved (not dropped)
     mockFetchWithNDJSON([
       JSON.stringify({ model: "test", created_at: "", message: { role: "assistant", content: "I am thinking" }, done: false }),
       JSON.stringify({ model: "test", created_at: "", message: { role: "assistant", content: "", thinking: "actually let me reconsider" }, done: false }),
@@ -897,10 +1039,16 @@ describe("Content block ordering", () => {
 
     if (doneEvent) {
       const content = doneEvent.message.content;
-      // Pass 2 absorbs the thinking sandwiched between text → 1 merged text block
+      // Thinking between text blocks is no longer dropped:
+      // text("I am thinking") + thinking("actually let me reconsider") + text("Final answer")
+      // → text("I am thinking\nactually let me reconsider\nFinal answer")
+      // (thinking content is embedded in text to avoid data loss)
       expect(content.length).toBe(1);
       expect(content[0].type).toBe("text");
-      expect(content[0].text).toBe("I am thinkingFinal answer");
+      expect(content[0].text).toContain("I am thinking");
+      expect(content[0].text).toContain("Final answer");
+      // The thinking content is preserved, not dropped
+      expect(content[0].text).toContain("actually let me reconsider");
     }
   });
 

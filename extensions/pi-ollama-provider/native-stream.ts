@@ -272,17 +272,19 @@ export function convertTools(
 // ── block merging ──
 
 /**
- * Merge adjacent same-type content blocks and absorb interleaved
- * thinking blocks that fall between text blocks.
+ * Merge adjacent same-type content blocks and handle interleaved
+ * thinking blocks between text blocks.
  *
  * GLM outputs thinking tokens in a long contiguous block, then text.
  * But occasionally it emits a trailing thinking fragment after text
  * has already started (e.g. text "I appreciate", thinking ".",
  * text " the request!"). This creates fragmented multi-block responses.
  *
- * Two passes:
+ * Three passes:
  * 1. Merge adjacent same-type blocks (text+text, thinking+thinking)
- * 2. Absorb any thinking block sandwiched between two text blocks
+ * 2. Merge sandwiched thinking blocks into an adjacent thinking block
+ *    or keep them as-is (never drop thinking content)
+ * 3. Re-merge any adjacent same-type blocks created by pass 2
  */
 export function mergeAdjacentBlocks(blocks: any[]): void {
   // Pass 1: merge adjacent same-type blocks
@@ -299,7 +301,9 @@ export function mergeAdjacentBlocks(blocks: any[]): void {
     }
   }
 
-  // Pass 2: absorb thinking blocks sandwiched between text blocks
+  // Pass 2: handle thinking blocks sandwiched between text blocks
+  // Instead of dropping thinking content, merge it into an existing
+  // thinking block or keep it as-is.
   for (let i = blocks.length - 1; i > 0; i--) {
     const curr = blocks[i];
     const prev = blocks[i - 1];
@@ -307,10 +311,174 @@ export function mergeAdjacentBlocks(blocks: any[]): void {
     if (prev.type === "text" && curr.type === "thinking") {
       const next = blocks[i + 1];
       if (next && next.type === "text") {
-        // Merge the two text blocks, dropping the thinking block entirely
+        // GLM sometimes emits: text "I appreciate" + thinking "." + text " the request!"
+        // This is a fragmented sentence — merge into one text block,
+        // but PRESERVE the thinking content by appending to an adjacent thinking block.
+        const thinkingContent = curr.thinking || "";
+
+        // Look for a nearby thinking block to merge into
+        const prevThinking = i >= 2 && blocks[i - 2]?.type === "thinking" ? blocks[i - 2] : null;
+        if (prevThinking && thinkingContent) {
+          // Merge thinking into the previous thinking block
+          prevThinking.thinking = (prevThinking.thinking || "") + thinkingContent;
+        } else {
+          // No adjacent thinking block — convert the sandwiched thinking into
+          // a newline + content within the merged text (better than dropping it)
+          if (thinkingContent.trim()) {
+            prev.text = (prev.text || "") + "\n" + thinkingContent + "\n";
+          }
+        }
+
+        // Merge the two text blocks, removing the thinking block
         prev.text = (prev.text || "") + (next.text || "");
-        blocks.splice(i, 2);
+        blocks.splice(i, 2); // remove thinking + next text
       }
+    }
+  }
+
+  // Pass 3: re-merge any adjacent same-type blocks created by pass 2
+  for (let i = blocks.length - 1; i > 0; i--) {
+    const curr = blocks[i];
+    const prev = blocks[i - 1];
+    if (!curr || !prev) continue;
+    if (prev.type === "thinking" && curr.type === "thinking") {
+      prev.thinking = (prev.thinking || "") + (curr.thinking || "");
+      blocks.splice(i, 1);
+    }
+  }
+}
+
+// ── thinking-text redirection ──
+
+/**
+ * Patterns that indicate a text block is actually internal thinking/reasoning
+ * that the model incorrectly emitted as regular content.
+ *
+ * GLM-5.x models with thinking enabled sometimes output brief planning
+ * statements ("Let me search...", "Now I'll check...", "Good, the build passed.")
+ * as `message.content` instead of `message.thinking`. These appear as visible
+ * text in the TUI, creating noisy "thinking literals".
+ *
+ * This heuristic redirects such text blocks into thinking blocks when:
+ * 1. The model has a thinking block in the same response
+ * 2. The text block is short (< threshold characters)
+ * 3. The text matches common thinking-literal patterns
+ */
+const THINKING_LITERAL_PATTERNS = [
+  /^Let me\b/i,
+  /^Now let\b/i,
+  /^Now I\b/i,
+  /^Good[,—\s]/i,
+  /^OK[,—\.\s]/i,
+  /^Alright[,—\s]/i,
+  /^Hmm[,\s]/i,
+  /^I (?:need|should|will|can|'ll|would)\b/i,
+  /^I'll\b/i,
+  /^I've\b/i,
+  /^Let's\b/i,
+  /^First,?\s/i,
+  /^Next,?\s/i,
+  /^The user\b/i,
+  /^Wait[,\s]/i,
+  /^Actually[,\s]/i,
+  /^I see[—,\s\.]/i,
+  /^I (?:also|already|still)\b/i,
+  /^This (?:looks|seems|appears)\b/i,
+];
+
+/** Maximum text length (in chars) to consider for thinking redirection. */
+const THINKING_LITERAL_MAX_LENGTH = 200;
+
+/**
+ * Check if a text block looks like internal thinking/reasoning content.
+ * Returns true if the text matches common thinking-literal patterns and is short.
+ */
+function looksLikeThinkingLiteral(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed || trimmed.length > THINKING_LITERAL_MAX_LENGTH) return false;
+  return THINKING_LITERAL_PATTERNS.some((p) => p.test(trimmed));
+}
+
+/**
+ * Redirect text blocks that look like internal thinking into thinking blocks.
+ *
+ * When a model is in thinking mode and emits short planning statements as
+ * regular text (instead of in the `thinking` field), this function detects
+ * those statements and moves their content into thinking blocks.
+ *
+ * Strategy:
+ * - If there's an existing thinking block in the response, merge into it
+ * - If there's no existing thinking block, convert the text block to a thinking block
+ * - Only redirects text blocks that match thinking-literal patterns
+ * - Preserves text blocks that don't match patterns (likely real user-facing content)
+ *
+ * @param blocks The content blocks array (mutated in place)
+ * @param hasThinkingMode Whether the model was called with thinking enabled
+ */
+export function redirectThinkingText(blocks: any[], hasThinkingMode: boolean): void {
+  if (!hasThinkingMode || blocks.length === 0) return;
+
+  // Find if there are any existing thinking blocks
+  const hasThinkingBlock = blocks.some((b) => b.type === "thinking");
+
+  // Check which text blocks look like thinking literals
+  const textIndicesToRedirect: number[] = [];
+  for (let i = 0; i < blocks.length; i++) {
+    if (blocks[i].type === "text" && looksLikeThinkingLiteral(blocks[i].text || "")) {
+      textIndicesToRedirect.push(i);
+    }
+  }
+
+  if (textIndicesToRedirect.length === 0) return;
+
+  // Redirect each thinking-literal text block
+  // Process in reverse to keep indices stable
+  for (let i = textIndicesToRedirect.length - 1; i >= 0; i--) {
+    const idx = textIndicesToRedirect[i];
+    const block = blocks[idx];
+    const text = (block.text || "").trim();
+
+    if (hasThinkingBlock) {
+      // Merge into the nearest thinking block
+      // Prefer the one just before this text block, otherwise the first thinking block
+      let targetIdx = -1;
+      for (let j = idx - 1; j >= 0; j--) {
+        if (blocks[j].type === "thinking") {
+          targetIdx = j;
+          break;
+        }
+      }
+      if (targetIdx === -1) {
+        // No thinking block before — find the first one
+        for (let j = 0; j < blocks.length; j++) {
+          if (blocks[j].type === "thinking") {
+            targetIdx = j;
+            break;
+          }
+        }
+      }
+
+      if (targetIdx >= 0) {
+        // Append to the target thinking block
+        blocks[targetIdx].thinking = (blocks[targetIdx].thinking || "") + "\n" + text;
+        // Remove the text block
+        blocks.splice(idx, 1);
+      }
+    } else {
+      // No thinking block exists — convert this text block into a thinking block
+      block.type = "thinking";
+      block.thinking = text;
+      delete block.text;
+    }
+  }
+
+  // Final pass: merge adjacent thinking blocks that may have been created
+  for (let i = blocks.length - 1; i > 0; i--) {
+    const curr = blocks[i];
+    const prev = blocks[i - 1];
+    if (prev.type === "thinking" && curr.type === "thinking") {
+      prev.thinking = (prev.thinking || "") + "\n" + (curr.thinking || "");
+      blocks.splice(i, 1);
     }
   }
 }
@@ -376,6 +544,8 @@ export interface StreamNativeOptions {
   ollamaOptions?: OllamaOptions;
   signal?: AbortSignal;
   keepAlive?: string;
+  /** Whether the model has reasoning/thinking capability and is in thinking mode. */
+  hasThinkingMode?: boolean;
 }
 
 /**
@@ -610,6 +780,9 @@ export async function streamNativeChat(
         // Merge adjacent same-type blocks (GLM interleaves tiny thinking fragments)
         mergeAdjacentBlocks(output.content);
 
+        // Redirect thinking-literal text into thinking blocks when model is in thinking mode
+        redirectThinkingText(output.content, !!options.hasThinkingMode);
+
         stream.push({ type: "done", reason: output.stopReason as "stop" | "length" | "toolUse", message: output });
         stream.end();
       }
@@ -755,6 +928,9 @@ async function retryNonStreaming(
 
   // Merge adjacent same-type blocks
   mergeAdjacentBlocks(output.content);
+
+  // Redirect thinking-literal text into thinking blocks when model is in thinking mode
+  redirectThinkingText(output.content, !!options.hasThinkingMode);
 
   stream.push({ type: "done", reason: output.stopReason as "stop" | "length" | "toolUse", message: output });
   stream.end();
