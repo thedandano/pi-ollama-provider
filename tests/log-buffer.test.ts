@@ -204,11 +204,11 @@ describe("log-buffer", () => {
       expect(status).not.toContain("more");
     });
 
-    it("uses singular 'error' for one error among warnings", () => {
+    it("uses 'issues' for mixed errors and warnings", () => {
       logError("local", "server unreachable");
       logWarn("cache", "discarding cache");
       const status = formatStatusLine();
-      expect(status).toContain("1 error");
+      expect(status).toContain("2 issues");
       expect(status).toContain("server unreachable");
       expect(status).toContain("discarding cache");
     });

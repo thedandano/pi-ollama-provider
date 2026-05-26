@@ -180,7 +180,11 @@ export function readSettings(): OllamaSettings {
     const parsed = JSON.parse(data);
     const ollamaSection = parsed?.ollama ?? {};
 
-    const { validated } = validateSettings(ollamaSection);
+    const { validated, issues } = validateSettings(ollamaSection);
+
+    for (const issue of issues) {
+      logWarn("settings", issue.message);
+    }
 
     return validated;
   } catch {
@@ -195,7 +199,10 @@ export function readSettings(): OllamaSettings {
 export function writeSettings(settings: OllamaSettings): void {
   try {
     // Validate before writing
-    const { validated } = validateSettings(settings);
+    const { validated, issues } = validateSettings(settings);
+    for (const issue of issues) {
+      logWarn("settings", issue.message);
+    }
 
     let existing: Record<string, unknown> = {};
     try {
@@ -220,7 +227,7 @@ export function writeSettings(settings: OllamaSettings): void {
       } catch {}
     }
   } catch (err) {
-    logError("settings", `settings write failed: ${err instanceof Error ? err.message : String(err)}`);
+    logWarn("settings", `settings write failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 

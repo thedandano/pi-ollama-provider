@@ -355,7 +355,7 @@ export function writeModelCache(cache: OllamaModelCache): void {
       "utf-8",
     );
   } catch (err) {
-    logError("cache", `cache write failed: ${err instanceof Error ? err.message : String(err)}`);
+    logWarn("cache", `cache write failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 

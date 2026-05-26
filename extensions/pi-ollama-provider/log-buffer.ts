@@ -9,11 +9,21 @@
  * During startup, only `pi` (ExtensionAPI) is available — no UI context.
  * Errors are buffered here and displayed once `session_start` fires
  * (which provides `ctx` with `ctx.ui.setStatus`).
+ *
+ * Severity levels:
+ *   - "warn": shown in status bar and auto-cleared after 8 seconds
+ *   - "error": shown in status bar persistently until cleared
+ *
+ * The status bar is refreshed on each session_start event. Warnings and
+ * errors from the previous session are cleared at that point so stale
+ * entries don't persist indefinitely.
  */
 
 // ── types ──
 
 export type LogLevel = "warn" | "error";
+
+export type LogSource = "local" | "cloud" | "cache" | "settings" | "stream" | "auto-pull";
 
 export interface LogEntry {
   /** Unix timestamp (Date.now()) */
@@ -21,7 +31,7 @@ export interface LogEntry {
   /** Severity level */
   level: LogLevel;
   /** Which subsystem produced this entry */
-  source: "local" | "cloud" | "cache" | "settings" | "stream" | "auto-pull";
+  source: LogSource;
   /** Human-readable message */
   message: string;
 }
@@ -32,7 +42,7 @@ const MAX_ENTRIES = 20;
 
 const logBuffer: LogEntry[] = [];
 
-function addEntry(level: LogLevel, source: LogEntry["source"], message: string): void {
+function addEntry(level: LogLevel, source: LogSource, message: string): void {
   logBuffer.push({ timestamp: Date.now(), level, source, message });
   if (logBuffer.length > MAX_ENTRIES) {
     logBuffer.splice(0, logBuffer.length - MAX_ENTRIES);
@@ -41,13 +51,19 @@ function addEntry(level: LogLevel, source: LogEntry["source"], message: string):
 
 // ── public API ──
 
-/** Log a warning. Shown in status bar (auto-cleared) and /ollama-status. */
-export function logWarn(source: LogEntry["source"], message: string): void {
+/**
+ * Log a warning. Shown in status bar on session_start and auto-cleared
+ * after 8 seconds. Also visible in /ollama-status.
+ */
+export function logWarn(source: LogSource, message: string): void {
   addEntry("warn", source, message);
 }
 
-/** Log an error. Shown in status bar (persistent) and /ollama-status. */
-export function logError(source: LogEntry["source"], message: string): void {
+/**
+ * Log an error. Shown persistently in status bar and in /ollama-status.
+ * Not auto-cleared — remains until the next session_start clears the buffer.
+ */
+export function logError(source: LogSource, message: string): void {
   addEntry("error", source, message);
 }
 
@@ -66,7 +82,12 @@ export function getErrors(): LogEntry[] {
   return logBuffer.filter((e) => e.level === "error");
 }
 
-/** Clear all buffered entries. */
+/** Return only warning-level entries. */
+export function getWarnings(): LogEntry[] {
+  return logBuffer.filter((e) => e.level === "warn");
+}
+
+/** Clear all buffered entries. Called on session_start to reset stale state. */
 export function clearLog(): void {
   logBuffer.length = 0;
 }
@@ -79,33 +100,40 @@ export function clearLog(): void {
  * Examples:
  *   "⚠ ollama: local server unreachable"
  *   "⚠ ollama: 2 errors — local unreachable, cloud auth failed"
- *   "⚠ ollama: 4 errors — local unreachable, cloud auth failed, +2 more"
+ *   "⚠ ollama: 1 warning — cache format unknown"
+ *   "⚠ ollama: 3 issues — local unreachable, cloud auth failed, +1 more"
  */
 export function formatStatusLine(): string | undefined {
   const entries = getRecentEntries(3);
   if (entries.length === 0) return undefined;
 
-  const errors = entries.filter((e) => e.level === "error");
-  const warnings = entries.filter((e) => e.level === "warn");
+  const errorCount = getErrors().length;
+  const warningCount = getWarnings().length;
 
-  if (errors.length === 0 && warnings.length === 0) return undefined;
+  if (errorCount === 0 && warningCount === 0) return undefined;
 
-  if (errors.length === 1 && warnings.length === 0) {
-    return `⚠ ollama: ${errors[0].message}`;
+  // Single entry — show directly
+  if (errorCount + warningCount === 1) {
+    const entry = logBuffer[logBuffer.length - 1];
+    return `⚠ ollama: ${entry.message}`;
   }
 
-  if (errors.length === 0 && warnings.length === 1) {
-    return `⚠ ollama: ${warnings[0].message}`;
-  }
-
-  // Multiple entries — summarize
+  // Multiple entries — summarize with severity-appropriate label
   const allRecent = entries;
-  const totalErrors = getErrors().length;
   const totalEntries = logBuffer.length;
   const overflow = totalEntries - allRecent.length;
 
   const summaries = allRecent.map((e) => e.message);
   const suffix = overflow > 0 ? `, +${overflow} more` : "";
 
-  return `⚠ ollama: ${totalErrors} error${totalErrors !== 1 ? "s" : ""} — ${summaries.join(", ")}${suffix}`;
+  if (errorCount > 0 && warningCount === 0) {
+    return `⚠ ollama: ${errorCount} error${errorCount !== 1 ? "s" : ""} — ${summaries.join(", ")}${suffix}`;
+  }
+
+  if (warningCount > 0 && errorCount === 0) {
+    return `⚠ ollama: ${warningCount} warning${warningCount !== 1 ? "s" : ""} — ${summaries.join(", ")}${suffix}`;
+  }
+
+  // Mixed errors and warnings
+  return `⚠ ollama: ${errorCount + warningCount} issue${(errorCount + warningCount) !== 1 ? "s" : ""} — ${summaries.join(", ")}${suffix}`;
 }
