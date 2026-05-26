@@ -61,6 +61,7 @@ export interface OllamaChatRequest {
 export interface OllamaChatMessage {
   role: "system" | "user" | "assistant" | "tool";
   content: string | null;
+  thinking?: string;
   images?: string[];
   tool_calls?: OllamaToolCall[];
   tool_call_id?: string;
@@ -172,16 +173,26 @@ export function convertMessages(
 
     // Handle content
     let content: string | null = null;
+    let thinking: string | undefined;
     const images: string[] = [];
 
     if (typeof msg.content === "string") {
       content = msg.content;
     } else if (Array.isArray(msg.content)) {
-      // Multi-part content (text + images)
+      // Multi-part content (text + thinking + images)
       const textParts: string[] = [];
+      const thinkingParts: string[] = [];
       for (const part of msg.content as Array<Record<string, unknown>>) {
         if (part.type === "text" && typeof part.text === "string") {
           textParts.push(part.text);
+        } else if (
+          part.type === "thinking" && typeof part.thinking === "string"
+        ) {
+          // Preserve thinking content so it can be sent back to Ollama
+          // as a separate field on assistant messages. Models like GLM rely
+          // on seeing their own thinking pattern in conversation history;
+          // without it they embed reasoning in message.content instead.
+          thinkingParts.push(part.thinking);
         } else if (
           part.type === "image_url" &&
           modelSupportsVision &&
@@ -197,6 +208,9 @@ export function convertMessages(
         }
       }
       content = textParts.join("\n") || null;
+      if (thinkingParts.length > 0) {
+        thinking = thinkingParts.join("\n");
+      }
     }
 
     // Handle tool_calls from assistant messages
@@ -229,6 +243,7 @@ export function convertMessages(
     return {
       role: ollamaRole,
       content,
+      ...(thinking ? { thinking } : {}),
       ...(images.length > 0 ? { images } : {}),
       ...(toolCalls ? { tool_calls: toolCalls } : {}),
     };
