@@ -52,6 +52,7 @@ import {
   resolveConfigAsync,
   readOllamaAuthFromJson,
   describeAuthSource,
+  authStorageFromRegistry,
   type OllamaConfig,
   DEFAULT_LOCAL_URL,
   DEFAULT_CLOUD_URL,
@@ -349,10 +350,9 @@ export default async function (pi: ExtensionAPI) {
 
   // ── Phase 2: Async AuthStorage resolution ──
 
-  // Available through ctx.modelRegistry.authStorage in command handlers.
-  // For startup, we use sync resolveConfig() which covers auth.json + env vars.
-  // AuthStorage provides additional runtime override support (--api-key flag).
-  // When we have access to authStorage asynchronously, we can refresh the config.
+  // Startup uses sync resolveConfig(), which reads auth.json + env vars.
+  // Command handlers persist credentials through authStorageFromRegistry:
+  // ctx.modelRegistry.authStorage on older Pi, auth.json on current Pi.
 
   // ── Register local provider (background refresh from API) ──
 
@@ -394,7 +394,7 @@ export default async function (pi: ExtensionAPI) {
         localBaseUrl: currentLocalBaseUrl(),
         cloudBaseUrl: currentConfig.mode === "cloud" ? currentConfig.baseUrl : DEFAULT_CLOUD_URL,
         apiKey: currentConfig.apiKey,
-        authStorage: ctx.modelRegistry.authStorage,
+        authStorage: authStorageFromRegistry(ctx.modelRegistry),
       }, async (mode, baseUrl, apiKey) => {
         currentConfig = { mode, baseUrl, apiKey };
         await registerLocalProvider(pi, readSettings());
