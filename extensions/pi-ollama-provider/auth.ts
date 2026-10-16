@@ -16,10 +16,11 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { getOllamaHost, DEFAULT_LOCAL_OLLAMA_URL } from "./discovery.js";
 
 const AUTH_PATH = join(homedir(), ".pi", "agent", "auth.json");
 
-export const DEFAULT_LOCAL_URL = "http://localhost:11434";
+export const DEFAULT_LOCAL_URL = DEFAULT_LOCAL_OLLAMA_URL;
 export const DEFAULT_CLOUD_URL = "https://ollama.com";
 
 export interface OllamaConfig {
@@ -116,7 +117,7 @@ export async function resolveConfigAsync(
   // OLLAMA_API_BASE env var for custom cloud endpoint
   const cloudBaseUrl = (options?.envBase ?? process.env.OLLAMA_API_BASE?.replace(/\/+$/, "")) || DEFAULT_CLOUD_URL;
   const mode: "local" | "cloud" = apiKey !== "ollama" ? "cloud" : "local";
-  const baseUrl = mode === "cloud" ? cloudBaseUrl : DEFAULT_LOCAL_URL;
+  const baseUrl = mode === "cloud" ? cloudBaseUrl : getOllamaHost();
 
   return { mode, baseUrl, apiKey, authSource };
 }
@@ -138,7 +139,7 @@ export function resolveConfig(options?: {
   if (stored) {
     const apiKey = stored.key;
     const mode: "local" | "cloud" = apiKey !== "ollama" ? "cloud" : "local";
-    const baseUrl = mode === "cloud" ? cloudBaseUrl : DEFAULT_LOCAL_URL;
+    const baseUrl = mode === "cloud" ? cloudBaseUrl : getOllamaHost();
     // Determine source: ollama-cloud vs ollama
     const authSource: OllamaConfig["authSource"] =
       apiKey !== "ollama" ? "auth-json-ollama-cloud" : "auth-json-ollama";
@@ -149,7 +150,7 @@ export function resolveConfig(options?: {
     return { mode: "cloud", baseUrl: cloudBaseUrl, apiKey: envKey, authSource: "env-var" };
   }
 
-  return { mode: "local", baseUrl: DEFAULT_LOCAL_URL, apiKey: "ollama", authSource: "default" };
+  return { mode: "local", baseUrl: getOllamaHost(), apiKey: "ollama", authSource: "default" };
 }
 
 /**

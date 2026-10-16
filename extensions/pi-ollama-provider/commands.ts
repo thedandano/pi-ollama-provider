@@ -20,6 +20,7 @@ import { readFileSync, writeFileSync, existsSync, renameSync, mkdtempSync, rmSyn
 import { join } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { logWarn, getRecentEntries } from "./log-buffer.js";
+import { normalizeOllamaHost, resolveLocalBaseUrl } from "./discovery.js";
 
 const SETTINGS_PATH = join(homedir(), ".pi", "agent", "settings.json");
 
@@ -43,6 +44,10 @@ export interface OllamaSettings {
   streamingMode?: "native" | "openai-compat";
   /** Whether to auto-pull models on select (default: true) */
   autoPull?: boolean;
+  /** Last setup choice. Runtime cloud vs local still follows auth resolution. */
+  mode?: "local" | "cloud";
+  /** Configured local Ollama server (no trailing slash). */
+  localBaseUrl?: string;
 }
 
 const DEFAULT_SETTINGS: OllamaSettings = {
@@ -166,6 +171,45 @@ export function validateSettings(settings: Partial<OllamaSettings>): {
     validated.autoPull = true;
   }
 
+  if (validated.mode !== undefined && validated.mode !== "local" && validated.mode !== "cloud") {
+    issues.push({
+      key: "mode",
+      value: validated.mode,
+      message: `Invalid mode "${String(validated.mode)}", expected "local" or "cloud". Ignoring.`,
+    });
+    delete validated.mode;
+  }
+
+  if (validated.localBaseUrl !== undefined) {
+    if (typeof validated.localBaseUrl !== "string") {
+      issues.push({
+        key: "localBaseUrl",
+        value: validated.localBaseUrl,
+        message: `Invalid localBaseUrl ${String(validated.localBaseUrl)}, expected an Ollama server URL. Ignoring.`,
+      });
+      delete validated.localBaseUrl;
+    } else {
+      const normalized = normalizeOllamaHost(validated.localBaseUrl);
+      let usable = false;
+      try {
+        const parsed = new URL(normalized);
+        usable = (parsed.protocol === "http:" || parsed.protocol === "https:") && parsed.hostname.length > 0;
+      } catch {
+        usable = false;
+      }
+      if (!usable) {
+        issues.push({
+          key: "localBaseUrl",
+          value: validated.localBaseUrl,
+          message: `Invalid localBaseUrl "${validated.localBaseUrl}". Ignoring.`,
+        });
+        delete validated.localBaseUrl;
+      } else {
+        validated.localBaseUrl = normalized;
+      }
+    }
+  }
+
   return { validated, issues };
 }
 
@@ -173,10 +217,10 @@ export function validateSettings(settings: Partial<OllamaSettings>): {
  * Read ollama settings from ~/.pi/agent/settings.json.
  * Merges with defaults for any missing keys and validates values.
  */
-export function readSettings(): OllamaSettings {
+export function readSettings(settingsPath: string = SETTINGS_PATH): OllamaSettings {
   try {
-    if (!existsSync(SETTINGS_PATH)) return { ...DEFAULT_SETTINGS };
-    const data = readFileSync(SETTINGS_PATH, "utf-8");
+    if (!existsSync(settingsPath)) return { ...DEFAULT_SETTINGS };
+    const data = readFileSync(settingsPath, "utf-8");
     const parsed = JSON.parse(data);
     const ollamaSection = parsed?.ollama ?? {};
 
@@ -196,7 +240,7 @@ export function readSettings(): OllamaSettings {
  * Write ollama settings, preserving other settings in the file.
  * Uses atomic write (temp file + rename) to prevent corruption on crash.
  */
-export function writeSettings(settings: OllamaSettings): void {
+export function writeSettings(settings: OllamaSettings, settingsPath: string = SETTINGS_PATH): void {
   try {
     // Validate before writing
     const { validated, issues } = validateSettings(settings);
@@ -206,8 +250,8 @@ export function writeSettings(settings: OllamaSettings): void {
 
     let existing: Record<string, unknown> = {};
     try {
-      if (existsSync(SETTINGS_PATH)) {
-        const data = readFileSync(SETTINGS_PATH, "utf-8");
+      if (existsSync(settingsPath)) {
+        const data = readFileSync(settingsPath, "utf-8");
         existing = JSON.parse(data);
       }
     } catch {}
@@ -219,7 +263,7 @@ export function writeSettings(settings: OllamaSettings): void {
     const tmpPath = join(tmpDir, "settings.json");
     try {
       writeFileSync(tmpPath, JSON.stringify(existing, null, 2), "utf-8");
-      renameSync(tmpPath, SETTINGS_PATH);
+      renameSync(tmpPath, settingsPath);
     } finally {
       // Clean up temp dir if rename failed
       try {
@@ -551,6 +595,8 @@ export interface SetupWizardDeps {
     set(key: string, value: any): void;
     remove(key: string): void;
   };
+  /** Override ~/.pi/agent/settings.json. Used by tests. */
+  settingsPath?: string;
 }
 
 export async function runSetupWizard(
@@ -559,12 +605,12 @@ export async function runSetupWizard(
   deps: SetupWizardDeps,
   onConfigChange: (mode: "local" | "cloud", baseUrl: string, apiKey: string) => Promise<void>,
 ): Promise<void> {
-  const { localBaseUrl, cloudBaseUrl, authStorage } = deps;
+  const { cloudBaseUrl, authStorage, settingsPath } = deps;
 
   const mode = await ctx.ui.select(
     "🦙 Ollama Setup — How would you like to use Ollama?",
     [
-      "Local — Run models on this machine (requires Ollama CLI)",
+      "Local — Run models on this machine or another Ollama server",
       "Cloud — Use cloud models on ollama.com",
     ],
   );
@@ -572,22 +618,52 @@ export async function runSetupWizard(
   if (!mode) return;
 
   if (mode.startsWith("Local")) {
-    const ready = await ensureOllamaCli(pi, ctx);
-    if (!ready) return;
-
-    if (authStorage.has("ollama")) {
-      authStorage.remove("ollama");
-    }
-    if (authStorage.has("ollama-cloud")) {
-      authStorage.remove("ollama-cloud");
+    const envHost = normalizedOllamaHostEnv();
+    if (envHost) {
+      ctx.ui.notify(`OLLAMA_HOST set to ${envHost}`, "info");
     }
 
-    await onConfigChange("local", localBaseUrl, "ollama");
-    ctx.ui.notify(
-      "✓ Setup complete! Use /models to see available Ollama models.",
-      "info",
-    );
-    return;
+    let draft = resolveLocalBaseUrl(readSettings(settingsPath).localBaseUrl);
+    while (true) {
+      const entered = await ctx.ui.editor(
+        "Local Ollama server URL — Enter accepts, Esc cancels",
+        draft,
+      );
+      if (entered === undefined || entered.trim() === "") {
+        ctx.ui.notify("Setup cancelled.", "warning");
+        return;
+      }
+
+      const url = normalizeOllamaHost(entered);
+      const skipCli = Boolean(envHost) || !isLoopbackUrl(url);
+      if (skipCli) {
+        const probe = await probeOllama(url);
+        if (!probe.ok) {
+          ctx.ui.notify(`✗ Could not reach Ollama at ${url}: ${probe.error}`, "error");
+          draft = url;
+          continue;
+        }
+      } else {
+        const ready = await ensureOllamaCli(pi, ctx, url);
+        if (!ready) return;
+      }
+
+      if (authStorage.has("ollama")) {
+        authStorage.remove("ollama");
+      }
+      if (authStorage.has("ollama-cloud")) {
+        authStorage.remove("ollama-cloud");
+      }
+
+      const current = readSettings(settingsPath);
+      writeSettings({ ...current, mode: "local", localBaseUrl: url }, settingsPath);
+      await onConfigChange("local", url, "ollama");
+      ctx.ui.notify(
+        "✓ Setup complete! Use /models to see available Ollama models.",
+        "info",
+      );
+      return;
+    }
   }
 
   // Cloud setup
@@ -595,7 +671,7 @@ export async function runSetupWizard(
     "🦙 Cloud Authentication — How would you like to authenticate?",
     [
       "API key — Enter an API key from ollama.com/settings/keys",
-      "Browser login — Install Ollama CLI and run 'ollama signin'",
+      "Browser login — Run 'ollama signin'",
     ],
   );
 
@@ -653,10 +729,9 @@ export async function runSetupWizard(
     return;
   }
 
-  // Browser login
-  const ready = await ensureOllamaCli(pi, ctx);
-  if (!ready) return;
-
+  // Browser login. `ollama signin` talks to ollama.com; do not install a CLI
+  // or start a localhost server first. The configured local URL (saved,
+  // OLLAMA_HOST, or the default) is where signed-in models are reached.
   ctx.ui.notify(
     "Running 'ollama signin'... Follow the browser prompts to authorize.",
     "info",
@@ -689,7 +764,7 @@ export async function runSetupWizard(
     authStorage.remove("ollama");
   }
 
-  await onConfigChange("local", localBaseUrl, "ollama");
+  await onConfigChange("local", resolveLocalBaseUrl(readSettings(settingsPath).localBaseUrl), "ollama");
   ctx.ui.notify(
     "✓ Setup complete! Use /models to see available Ollama models.",
     "info",
@@ -697,6 +772,40 @@ export async function runSetupWizard(
 }
 
 // ── setup helpers ──
+
+function normalizedOllamaHostEnv(): string | undefined {
+  const raw = process.env.OLLAMA_HOST;
+  if (!raw || !raw.trim()) return undefined;
+  return normalizeOllamaHost(raw);
+}
+
+/** True for this machine's loopback names. Other hosts are remote servers. */
+function isLoopbackUrl(url: string): boolean {
+  try {
+    // Node's URL.hostname keeps brackets on IPv6 ("[::1]").
+    const hostname = new URL(url).hostname.replace(/^\[|\]$/g, "").toLowerCase();
+    return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+  } catch {
+    return false;
+  }
+}
+
+async function probeOllama(url: string): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    const res = await fetch(`${url}/api/tags`, {
+      headers: { "Content-Type": "application/json" },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      const detail = body.trim();
+      return { ok: false, error: detail ? `HTTP ${res.status}: ${detail}` : `HTTP ${res.status}` };
+    }
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
 
 async function checkOllamaInstalled(pi: ExtensionAPI): Promise<boolean> {
   try {
@@ -738,6 +847,7 @@ async function installOllama(
 async function startOllamaService(
   pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
+  baseUrl: string,
 ): Promise<boolean> {
   ctx.ui.setStatus("ollama-setup", "Starting Ollama...");
   try {
@@ -748,7 +858,7 @@ async function startOllamaService(
     for (let i = 0; i < 10; i++) {
       await new Promise((r) => setTimeout(r, 1000));
       try {
-        const res = await fetch("http://localhost:11434/api/tags", {
+        const res = await fetch(`${baseUrl}/api/tags`, {
           signal: AbortSignal.timeout(3000),
         });
         if (res.ok) {
@@ -778,6 +888,7 @@ async function startOllamaService(
 async function ensureOllamaCli(
   pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
+  baseUrl: string,
 ): Promise<boolean> {
   const isInstalled = await checkOllamaInstalled(pi);
 
@@ -799,9 +910,9 @@ async function ensureOllamaCli(
     if (!installed) return false;
   }
 
-  // Check if running
+  // Check if the configured local server is running
   try {
-    const res = await fetch("http://localhost:11434/api/tags", {
+    const res = await fetch(`${baseUrl}/api/tags`, {
       signal: AbortSignal.timeout(3000),
     });
     if (res.ok) return true;
@@ -813,7 +924,7 @@ async function ensureOllamaCli(
   );
 
   if (start) {
-    return startOllamaService(pi, ctx);
+    return startOllamaService(pi, ctx, baseUrl);
   } else {
     ctx.ui.notify(
       "Start Ollama manually with 'ollama serve' before using models.",

@@ -18,7 +18,7 @@ This version implements the full set of recommendations from the [Ollama Provide
 | **`/ollama-status`** | ❌ | ✅ Connection status + loaded models |
 | **`/ollama-info`** | ❌ | ✅ Detailed model info from `/api/show` |
 | **Sampling settings** | ❌ None | ✅ `temperature`, `top_p`, `top_k` via settings.json |
-| **`OLLAMA_HOST`** | ❌ Hardcoded localhost | ✅ Respects env var |
+| **`OLLAMA_HOST`** | ❌ Hardcoded localhost | ✅ Saved URL, then env var |
 | **Web tools (cloud)** | ❌ | ✅ `ollama_web_search` + `ollama_web_fetch` |
 | **`OLLAMA_KEEP_ALIVE`** | ❌ Default 5 min | ✅ Default 30 min for agent sessions |
 | **Cloud model filtering** | ❌ All models | ✅ Only tool-capable models |
@@ -29,7 +29,7 @@ This version implements the full set of recommendations from the [Ollama Provide
 - **Always sets `num_ctx`** — Prevents Ollama's 4096 default from silently truncating system prompts and conversation history
 - **Ghost-token retry** — Detects when the model generated tokens but streaming returned nothing, automatically retries with `stream: false`
 - **Context overflow detection** — Recognizes Ollama's 400 errors ("prompt too long; exceeded max context length") for proper auto-compaction
-- **Local and cloud models** — Discovers models from local Ollama at `localhost:11434` and cloud models at `ollama.com`
+- **Local and cloud models** — Discovers models from the configured local Ollama server and cloud models at `ollama.com`
 - **Two-tier model discovery** — Cache-first registration (instant startup), then background refresh from `/api/tags` + `/api/show`
 - **Tool capability detection** — Detects from `capabilities: ["tools"]` and known tool-capable families (llama3.1+, qwen2.5+, gemma4, etc.)
 - **Vision detection** — Marks models with `input: ["text", "image"]` via capabilities, architecture, and CLIP flags
@@ -38,7 +38,7 @@ This version implements the full set of recommendations from the [Ollama Provide
 - **Separate cloud provider** — `ollama-cloud` provider connects directly to ollama.com/v1 (no local server needed)
 - **Cloud web tools** — `ollama_web_search` and `ollama_web_fetch` tools for Ollama Cloud (enable via `PI_OLLAMA_WEB_TOOLS=1`)
 - **Auto-pull on select** — When you select a model that isn't installed, it auto-pulls with a streaming progress bar
-- **`OLLAMA_HOST` support** — Respects the `OLLAMA_HOST` environment variable for custom server locations
+- **`OLLAMA_HOST` support** — Uses a saved server URL, then `OLLAMA_HOST`, then `http://localhost:11434`
 - **`OLLAMA_KEEP_ALIVE`** — Defaults to 30 minutes for agent sessions (prevents model unloading between turns)
 - **Sampling parameters** — Configure `temperature`, `top_p`, `top_k`, etc. via `~/.pi/agent/settings.json`
 - **`/ollama-setup`** — Interactive setup wizard: choose local or cloud, install Ollama, authenticate
@@ -73,13 +73,16 @@ Run the interactive setup wizard:
 
 The wizard guides you through:
 
-1. **Local or Cloud** — choose whether to run models locally or connect to ollama.com
+1. **Local or Cloud** — choose whether to run models on an Ollama server or connect to ollama.com
 2. **Local mode:**
-   - Installs Ollama if not found (`curl -fsSL https://ollama.com/install.sh | sh`)
-   - Starts the Ollama service if not running
-   - Optionally configures cloud model access via `ollama signin` or API key
+   - If `OLLAMA_HOST` is set, shows `OLLAMA_HOST set to <normalized url>` and does not install or start the CLI
+   - Opens an editor with the server URL filled in. Press Enter to accept it, edit it, or press Esc to cancel
+   - Prefill order: previously saved local URL, then `OLLAMA_HOST`, then `http://localhost:11434`
+   - Checks `<url>/api/tags`. On success, saves `mode=local` and that URL. On failure, shows the error and asks again
+   - For `localhost`, `127.0.0.1`, or `::1`, when `OLLAMA_HOST` is not set: installs Ollama if needed and starts `ollama serve`
+   - For any other host, or whenever `OLLAMA_HOST` is set: skips CLI install/start and only verifies `/api/tags`
 3. **Cloud mode:**
-   - Asks for your ollama.com API key
+   - Asks for your ollama.com API key, or runs `ollama signin` without installing or starting a local server
    - Configures the extension to connect directly (no local Ollama required)
 
 Configuration is saved to `~/.pi/agent/auth.json` under the `ollama` key (shared with all pi providers).
@@ -94,11 +97,16 @@ Set `OLLAMA_API_KEY` to connect to ollama.com without the wizard:
 export OLLAMA_API_KEY=your-key-here
 ```
 
-Set `OLLAMA_HOST` to use a custom Ollama server:
+Set `OLLAMA_HOST` to use an Ollama server on another host or port. A missing scheme becomes `http://`, and a missing port becomes `:11434`:
 
 ```bash
-export OLLAMA_HOST=http://192.168.1.100:11434
+export OLLAMA_HOST=192.168.1.100
+# http://192.168.1.100:11434
+
+export OLLAMA_HOST=http://192.168.1.100:8080
 ```
+
+A URL saved by `/ollama-setup` takes priority over `OLLAMA_HOST`. While `OLLAMA_HOST` is set, local setup announces the normalized value and does not install or start the Ollama CLI.
 
 Set `OLLAMA_KEEP_ALIVE` to control how long models stay loaded (default: 30m):
 
@@ -135,6 +143,8 @@ Configure Ollama-specific options in `~/.pi/agent/settings.json`:
 | `options.top_p` | model default | Nucleus sampling threshold |
 | `options.top_k` | model default | Top-K sampling |
 | `options.num_predict` | model default | Max tokens to generate |
+| `localBaseUrl` | `http://localhost:11434` | Local Ollama server saved by `/ollama-setup` |
+| `mode` | unset | `local` after a successful local setup |
 
 ### Web tools (cloud)
 
@@ -211,7 +221,7 @@ npm test          # Run all tests
 npm run test:watch # Watch mode
 ```
 
-116 tests across 6 test files covering:
+337 tests covering:
 - Auth resolution priority chain
 - NDJSON parsing (single/multi/chunked/malformed)
 - Message conversion (developer→system, images, tool results)
@@ -221,7 +231,8 @@ npm run test:watch # Watch mode
 - Capability inference (vision, tools, reasoning)
 - Context length extraction
 - Cloud model detection
-- OLLAMA_HOST env var handling
+- OLLAMA_HOST normalization and saved local URL priority
+- Local setup URL prompt, remote `/api/tags` checks, and CLI skip rules
 - num_ctx calculation
 - Setup wizard flows
 

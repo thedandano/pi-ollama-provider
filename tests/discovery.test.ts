@@ -26,6 +26,8 @@ import {
   readModelCache,
   writeModelCache,
   CACHE_PATH,
+  normalizeOllamaHost,
+  resolveLocalBaseUrl,
 } from "../extensions/pi-ollama-provider/discovery.js";
 
 // ════════════════════════════════════════════════════════════════
@@ -386,5 +388,79 @@ describe("getOllamaHost", () => {
   it("supports custom port", () => {
     process.env.OLLAMA_HOST = "http://192.168.1.100:8080";
     expect(getOllamaHost()).toBe("http://192.168.1.100:8080");
+  });
+
+  it("adds http:// and :11434 when OLLAMA_HOST is only a host", () => {
+    process.env.OLLAMA_HOST = "192.168.1.50";
+    expect(getOllamaHost()).toBe("http://192.168.1.50:11434");
+  });
+
+  it("adds :11434 when an http URL omits the port", () => {
+    process.env.OLLAMA_HOST = "http://192.168.1.50";
+    expect(getOllamaHost()).toBe("http://192.168.1.50:11434");
+  });
+
+  it("adds :11434 when an https URL omits the port", () => {
+    process.env.OLLAMA_HOST = "https://ollama.lan";
+    expect(getOllamaHost()).toBe("https://ollama.lan:11434");
+  });
+
+  it("trims whitespace around OLLAMA_HOST", () => {
+    process.env.OLLAMA_HOST = "  10.0.0.8:8080  ";
+    expect(getOllamaHost()).toBe("http://10.0.0.8:8080");
+  });
+});
+
+describe("normalizeOllamaHost", () => {
+  it("returns the default local URL for empty input", () => {
+    expect(normalizeOllamaHost("")).toBe("http://localhost:11434");
+    expect(normalizeOllamaHost("   ")).toBe("http://localhost:11434");
+  });
+
+  it("adds scheme and port to a bare host", () => {
+    expect(normalizeOllamaHost("gpu-box")).toBe("http://gpu-box:11434");
+  });
+
+  it("keeps an explicit port and strips a trailing slash", () => {
+    expect(normalizeOllamaHost("http://gpu-box:8080/")).toBe("http://gpu-box:8080");
+  });
+
+  it("brackets bare IPv6 and adds the default port", () => {
+    expect(normalizeOllamaHost("::1")).toBe("http://[::1]:11434");
+    expect(normalizeOllamaHost("[::1]:11434")).toBe("http://[::1]:11434");
+  });
+});
+
+describe("resolveLocalBaseUrl", () => {
+  const originalHost = process.env.OLLAMA_HOST;
+
+  afterEach(() => {
+    if (originalHost !== undefined) {
+      process.env.OLLAMA_HOST = originalHost;
+    } else {
+      delete process.env.OLLAMA_HOST;
+    }
+  });
+
+  it("prefers a saved URL over OLLAMA_HOST and the default", () => {
+    process.env.OLLAMA_HOST = "10.0.0.2:11434";
+    expect(resolveLocalBaseUrl("http://10.0.0.1:9999")).toBe("http://10.0.0.1:9999");
+  });
+
+  it("normalizes a saved shorthand URL", () => {
+    process.env.OLLAMA_HOST = "10.0.0.2";
+    expect(resolveLocalBaseUrl("10.0.0.1")).toBe("http://10.0.0.1:11434");
+  });
+
+  it("falls through blank saved values to OLLAMA_HOST", () => {
+    process.env.OLLAMA_HOST = "10.0.0.2";
+    expect(resolveLocalBaseUrl("  ")).toBe("http://10.0.0.2:11434");
+    expect(resolveLocalBaseUrl(undefined)).toBe("http://10.0.0.2:11434");
+    expect(resolveLocalBaseUrl(null)).toBe("http://10.0.0.2:11434");
+  });
+
+  it("defaults to localhost:11434 when nothing is configured", () => {
+    delete process.env.OLLAMA_HOST;
+    expect(resolveLocalBaseUrl(undefined)).toBe("http://localhost:11434");
   });
 });
