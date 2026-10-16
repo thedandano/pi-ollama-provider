@@ -52,16 +52,17 @@ import {
   resolveConfigAsync,
   readOllamaAuthFromJson,
   describeAuthSource,
+  authStorageFromRegistry,
   type OllamaConfig,
   DEFAULT_LOCAL_URL,
   DEFAULT_CLOUD_URL,
 } from "./auth.js";
 import {
-  getOllamaHost,
   discoverModels,
   readModelCache,
   writeModelCache,
   assembleModelsFromCache,
+  resolveLocalBaseUrl,
   type OllamaModelConfig,
   type OllamaModelCache,
 } from "./discovery.js";
@@ -69,12 +70,12 @@ import { registerCloudProvider, registerCloudTools } from "./cloud.js";
 import { streamNativeChat } from "./native-stream.js";
 import { isOllamaContextOverflow as isOverflowFromSafety, calculateNumCtx, getDefaultKeepAlive } from "./context-safety.js";
 import { readSettings, writeSettings, handleStatusCommand, handleInfoCommand, handlePullCommand, runSetupWizard, type OllamaSettings } from "./commands.js";
-import { formatStatusLine } from "./log-buffer.js";
+import { formatStatusLine, logError } from "./log-buffer.js";
 
 // Re-export for testing
 export { resolveConfig, resolveConfigAsync, readOllamaAuthFromJson, describeAuthSource, DEFAULT_LOCAL_URL, DEFAULT_CLOUD_URL } from "./auth.js";
 export type { OllamaConfig } from "./auth.js";
-export { hasVision, hasToolSupport, hasReasoning, isCloudModel, generateModelId, extractContextLength, getOllamaHost, assembleModelsFromCache, type OllamaModelCache } from "./discovery.js";
+export { hasVision, hasToolSupport, hasReasoning, isCloudModel, generateModelId, extractContextLength, getOllamaHost, normalizeOllamaHost, resolveLocalBaseUrl, assembleModelsFromCache, type OllamaModelCache } from "./discovery.js";
 export { parseNDJSON, convertMessages, convertTools, isGhostTokenStream, isOllamaContextOverflow } from "./native-stream.js";
 export { isOllamaContextOverflow as isOllamaOverflowFromSafety, calculateNumCtx, getDefaultKeepAlive } from "./context-safety.js";
 export { readSettings, writeSettings, validateSettings, type SettingsValidationIssue, type OllamaSettings } from "./commands.js";
@@ -93,6 +94,14 @@ const OLLAMA_NATIVE_API = "ollama-native";
 let currentConfig: OllamaConfig = resolveConfig();
 let localModelNames = new Set<string>();
 let lastLoadedModels: string[] = [];
+
+/**
+ * Single source of truth for the local Ollama base URL:
+ * saved settings, then OLLAMA_HOST, then http://localhost:11434.
+ */
+function currentLocalBaseUrl(): string {
+  return resolveLocalBaseUrl(readSettings().localBaseUrl);
+}
 
 // ── native streamSimple function ──
 
@@ -151,7 +160,7 @@ function createNativeStreamSimple(
  * with fallback to openai-compat if native fails.
  */
 async function registerLocalProvider(pi: ExtensionAPI, settings: OllamaSettings): Promise<void> {
-  const baseUrl = getOllamaHost();
+  const baseUrl = currentLocalBaseUrl();
   const config = currentConfig;
 
   // Two-tier discovery: cache-first, then API refresh
@@ -270,7 +279,7 @@ function registerFromCache(pi: ExtensionAPI): boolean {
       streamSimple: createNativeStreamSimple(
         currentConfig.mode === "cloud"
           ? currentConfig.baseUrl
-          : getOllamaHost(),
+          : currentLocalBaseUrl(),
         currentConfig.apiKey,
         settings,
       ),
@@ -309,7 +318,7 @@ function handleModelSelect(
 
     // Interactive confirmation for large downloads
     try {
-      await handlePullCommand(modelId, event, getOllamaHost(), currentConfig.apiKey);
+      await handlePullCommand(modelId, event, currentLocalBaseUrl(), currentConfig.apiKey);
     } catch {
       // Auto-pull failed — non-fatal, user can pull manually
     }
@@ -321,8 +330,12 @@ function handleModelSelect(
 export default async function (pi: ExtensionAPI) {
   // ── Phase 1: Synchronous startup (cache-first) ──
 
-  // Resolve config with sync fallback for immediate cache registration
+  // Resolve config with sync fallback for immediate cache registration.
+  // Local requests share resolveLocalBaseUrl (saved URL > OLLAMA_HOST > default).
   currentConfig = resolveConfig();
+  if (currentConfig.mode === "local") {
+    currentConfig = { ...currentConfig, baseUrl: currentLocalBaseUrl() };
+  }
 
   // Auth source (for /ollama-status display, not logged to TUI)
   const authSource = describeAuthSource(currentConfig);
@@ -337,10 +350,9 @@ export default async function (pi: ExtensionAPI) {
 
   // ── Phase 2: Async AuthStorage resolution ──
 
-  // Available through ctx.modelRegistry.authStorage in command handlers.
-  // For startup, we use sync resolveConfig() which covers auth.json + env vars.
-  // AuthStorage provides additional runtime override support (--api-key flag).
-  // When we have access to authStorage asynchronously, we can refresh the config.
+  // Startup uses sync resolveConfig(), which reads auth.json + env vars.
+  // Command handlers persist credentials through authStorageFromRegistry:
+  // ctx.modelRegistry.authStorage on older Pi, auth.json on current Pi.
 
   // ── Register local provider (background refresh from API) ──
 
@@ -379,10 +391,10 @@ export default async function (pi: ExtensionAPI) {
     description: "Interactive setup wizard for Ollama (local or cloud)",
     handler: async (_args, ctx) => {
       await runSetupWizard(pi, ctx, {
-        localBaseUrl: getOllamaHost(),
+        localBaseUrl: currentLocalBaseUrl(),
         cloudBaseUrl: currentConfig.mode === "cloud" ? currentConfig.baseUrl : DEFAULT_CLOUD_URL,
         apiKey: currentConfig.apiKey,
-        authStorage: ctx.modelRegistry.authStorage,
+        authStorage: authStorageFromRegistry(ctx.modelRegistry),
       }, async (mode, baseUrl, apiKey) => {
         currentConfig = { mode, baseUrl, apiKey };
         await registerLocalProvider(pi, readSettings());
@@ -408,7 +420,7 @@ export default async function (pi: ExtensionAPI) {
         return;
       }
       try {
-        await handlePullCommand(name, ctx, getOllamaHost(), currentConfig.apiKey);
+        await handlePullCommand(name, ctx, currentLocalBaseUrl(), currentConfig.apiKey);
         // Refresh model list after pull
         await registerLocalProvider(pi, readSettings());
       } catch (err) {
@@ -426,7 +438,7 @@ export default async function (pi: ExtensionAPI) {
       await handleStatusCommand(
         pi,
         ctx,
-        getOllamaHost(),
+        currentLocalBaseUrl(),
         currentConfig.apiKey,
         localModelNames,
         lastLoadedModels,
@@ -438,7 +450,7 @@ export default async function (pi: ExtensionAPI) {
   pi.registerCommand("ollama-info", {
     description: "Show detailed model info from /api/show (e.g., /ollama-info llama3.1:8b)",
     handler: async (args, ctx) => {
-      await handleInfoCommand(args, ctx, getOllamaHost(), currentConfig.apiKey);
+      await handleInfoCommand(args, ctx, currentLocalBaseUrl(), currentConfig.apiKey);
     },
   });
 

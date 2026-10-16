@@ -27,11 +27,13 @@ beforeEach(() => {
   authPath = join(tempDir, "auth.json");
   delete process.env.OLLAMA_API_KEY;
   delete process.env.OLLAMA_API_BASE;
+  delete process.env.OLLAMA_HOST;
 });
 
 afterEach(() => {
   delete process.env.OLLAMA_API_KEY;
   delete process.env.OLLAMA_API_BASE;
+  delete process.env.OLLAMA_HOST;
   if (existsSync(tempDir)) {
     rmSync(tempDir, { recursive: true, force: true });
   }
@@ -173,9 +175,17 @@ describe("resolveConfig", () => {
 
   it("OLLAMA_API_BASE via options override", () => {
     const config = resolveConfig({ authPath, envBase: "https://override.example.com" });
-    // Since no auth and no envKey, mode is local, so baseUrl is DEFAULT_LOCAL_URL
+    // Since no auth and no envKey, mode is local, so baseUrl is the local server
     expect(config.mode).toBe("local");
     expect(config.baseUrl).toBe(DEFAULT_LOCAL_URL);
+  });
+
+  it("local mode uses normalized OLLAMA_HOST as the base URL", () => {
+    process.env.OLLAMA_HOST = "10.2.3.4";
+    writeFileSync(authPath, JSON.stringify({}));
+    const config = resolveConfig({ authPath, envKey: "" });
+    expect(config.mode).toBe("local");
+    expect(config.baseUrl).toBe("http://10.2.3.4:11434");
   });
 
   it("OLLAMA_API_BASE with cloud mode uses custom endpoint", () => {
@@ -274,6 +284,14 @@ describe("resolveConfigAsync", () => {
     const config = await resolveConfigAsync(store);
     expect(config.apiKey).toBe("ollama");
     expect(config.mode).toBe("local");
+  });
+
+  it("local mode uses normalized OLLAMA_HOST", async () => {
+    process.env.OLLAMA_HOST = "gpu.lan";
+    const store = mockAuthStore({});
+    const config = await resolveConfigAsync(store, { envKey: undefined });
+    expect(config.mode).toBe("local");
+    expect(config.baseUrl).toBe("http://gpu.lan:11434");
   });
 });
 

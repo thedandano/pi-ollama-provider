@@ -13,13 +13,17 @@
  * Falls back to direct readFileSync only for synchronous startup cache.
  */
 
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-import { homedir } from "node:os";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { getOllamaHost, DEFAULT_LOCAL_OLLAMA_URL } from "./discovery.js";
 
-const AUTH_PATH = join(homedir(), ".pi", "agent", "auth.json");
+/** Resolved at call time so tests can point HOME at a temp directory. */
+export function ollamaAuthPath(): string {
+  return join(homedir(), ".pi", "agent", "auth.json");
+}
 
-export const DEFAULT_LOCAL_URL = "http://localhost:11434";
+export const DEFAULT_LOCAL_URL = DEFAULT_LOCAL_OLLAMA_URL;
 export const DEFAULT_CLOUD_URL = "https://ollama.com";
 
 export interface OllamaConfig {
@@ -39,7 +43,7 @@ export interface OllamaConfig {
  * resolution (including runtime overrides and file locking).
  */
 export function readOllamaAuthFromJson(
-  authPath: string = AUTH_PATH,
+  authPath: string = ollamaAuthPath(),
 ): { type: "api_key"; key: string } | undefined {
   try {
     const data = readFileSync(authPath, "utf-8");
@@ -116,7 +120,7 @@ export async function resolveConfigAsync(
   // OLLAMA_API_BASE env var for custom cloud endpoint
   const cloudBaseUrl = (options?.envBase ?? process.env.OLLAMA_API_BASE?.replace(/\/+$/, "")) || DEFAULT_CLOUD_URL;
   const mode: "local" | "cloud" = apiKey !== "ollama" ? "cloud" : "local";
-  const baseUrl = mode === "cloud" ? cloudBaseUrl : DEFAULT_LOCAL_URL;
+  const baseUrl = mode === "cloud" ? cloudBaseUrl : getOllamaHost();
 
   return { mode, baseUrl, apiKey, authSource };
 }
@@ -138,7 +142,7 @@ export function resolveConfig(options?: {
   if (stored) {
     const apiKey = stored.key;
     const mode: "local" | "cloud" = apiKey !== "ollama" ? "cloud" : "local";
-    const baseUrl = mode === "cloud" ? cloudBaseUrl : DEFAULT_LOCAL_URL;
+    const baseUrl = mode === "cloud" ? cloudBaseUrl : getOllamaHost();
     // Determine source: ollama-cloud vs ollama
     const authSource: OllamaConfig["authSource"] =
       apiKey !== "ollama" ? "auth-json-ollama-cloud" : "auth-json-ollama";
@@ -149,7 +153,7 @@ export function resolveConfig(options?: {
     return { mode: "cloud", baseUrl: cloudBaseUrl, apiKey: envKey, authSource: "env-var" };
   }
 
-  return { mode: "local", baseUrl: DEFAULT_LOCAL_URL, apiKey: "ollama", authSource: "default" };
+  return { mode: "local", baseUrl: getOllamaHost(), apiKey: "ollama", authSource: "default" };
 }
 
 /**
@@ -162,4 +166,79 @@ export function authHeaders(config?: OllamaConfig): Record<string, string> {
     headers["Authorization"] = `Bearer ${resolvedConfig.apiKey}`;
   }
   return headers;
+}
+
+/**
+ * Credential store used by /ollama-setup.
+ * Older Pi builds expose AuthStorage at ctx.modelRegistry.authStorage.
+ * Current Pi's ModelRegistry facade does not, so .has would throw.
+ * Fall back to auth.json, which is what resolveConfig reads on startup.
+ */
+export interface ProviderCredentialStore {
+  has(key: string): boolean;
+  get(key: string): unknown;
+  set(key: string, value: unknown): void;
+  remove(key: string): void;
+}
+
+export function authStorageFromRegistry(
+  registry: { authStorage?: ProviderCredentialStore } | null | undefined,
+): ProviderCredentialStore {
+  const storage = registry?.authStorage;
+  if (
+    storage &&
+    typeof storage.has === "function" &&
+    typeof storage.set === "function" &&
+    typeof storage.remove === "function"
+  ) {
+    return storage;
+  }
+  return createFileCredentialStore();
+}
+
+export function createFileCredentialStore(authPath: string = ollamaAuthPath()): ProviderCredentialStore {
+  return {
+    has(key: string) {
+      return Object.prototype.hasOwnProperty.call(readAuthDocument(authPath), key);
+    },
+    get(key: string) {
+      return readAuthDocument(authPath)[key];
+    },
+    set(key: string, value: unknown) {
+      const data = readAuthDocument(authPath);
+      data[key] = value;
+      writeAuthDocument(authPath, data);
+    },
+    remove(key: string) {
+      const data = readAuthDocument(authPath);
+      if (!Object.prototype.hasOwnProperty.call(data, key)) return;
+      delete data[key];
+      writeAuthDocument(authPath, data);
+    },
+  };
+}
+
+function readAuthDocument(authPath: string): Record<string, unknown> {
+  try {
+    if (!existsSync(authPath)) return {};
+    const parsed = JSON.parse(readFileSync(authPath, "utf-8"));
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {}
+  return {};
+}
+
+function writeAuthDocument(authPath: string, data: Record<string, unknown>): void {
+  mkdirSync(dirname(authPath), { recursive: true });
+  const tmpDir = mkdtempSync(join(tmpdir(), "pi-ollama-auth-"));
+  const tmpPath = join(tmpDir, "auth.json");
+  try {
+    writeFileSync(tmpPath, JSON.stringify(data, null, 2), "utf-8");
+    renameSync(tmpPath, authPath);
+  } finally {
+    try {
+      if (existsSync(tmpDir)) rmSync(tmpDir, { recursive: true, force: true });
+    } catch {}
+  }
 }

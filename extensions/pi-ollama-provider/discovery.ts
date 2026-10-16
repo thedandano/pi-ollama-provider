@@ -20,7 +20,8 @@
  *   - Reasoning: capabilities.includes("thinking") or model name patterns
  *   - Context window: model_info.*.context_length from /api/show
  *
- * Also supports OLLAMA_HOST env var for custom server location.
+ * Local base URL: saved settings, then OLLAMA_HOST, then http://localhost:11434.
+ * See resolveLocalBaseUrl / normalizeOllamaHost.
  */
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
@@ -174,16 +175,68 @@ const REASONING_PATTERNS = [
 
 // ── OLLAMA_HOST resolution ──
 
-export function getOllamaHost(): string {
-  const host = process.env.OLLAMA_HOST;
-  if (!host) return "http://localhost:11434";
+export const DEFAULT_LOCAL_OLLAMA_URL = "http://localhost:11434";
 
-  // OLLAMA_HOST may or may not include the scheme
-  if (host.startsWith("http://") || host.startsWith("https://")) {
-    return host.replace(/\/+$/, ""); // strip trailing slash
+/**
+ * Normalize an Ollama server location.
+ *
+ * Accepts the same shorthand as OLLAMA_HOST (`host`, `host:port`, or a full URL).
+ * A missing scheme becomes `http://`. A missing port becomes `:11434` — the Ollama
+ * API port — including when the caller already wrote `http://` or `https://`.
+ * Trailing slashes are removed. Empty input falls back to localhost:11434.
+ */
+export function normalizeOllamaHost(raw: string | undefined | null): string {
+  const trimmed = (raw ?? "").trim();
+  if (!trimmed) return DEFAULT_LOCAL_OLLAMA_URL;
+
+  let scheme = "http";
+  let rest = trimmed;
+  const schemeMatch = trimmed.match(/^(https?):\/\//i);
+  if (schemeMatch) {
+    scheme = schemeMatch[1].toLowerCase();
+    rest = trimmed.slice(schemeMatch[0].length);
   }
 
-  return `http://${host.replace(/\/+$/, "")}`;
+  const slash = rest.indexOf("/");
+  const hostport = (slash === -1 ? rest : rest.slice(0, slash)).replace(/\/+$/, "");
+  const path = slash === -1 ? "" : rest.slice(slash).replace(/\/+$/, "");
+  if (!hostport) return DEFAULT_LOCAL_OLLAMA_URL;
+
+  return `${scheme}://${ensureOllamaPort(hostport)}${path}`;
+}
+
+function ensureOllamaPort(hostport: string): string {
+  if (hostport.startsWith("[")) {
+    if (/\]:\d+$/.test(hostport)) return hostport;
+    return `${hostport}:11434`;
+  }
+
+  const colonCount = hostport.split(":").length - 1;
+  if (colonCount === 0) return `${hostport}:11434`;
+  if (colonCount === 1) {
+    const port = hostport.slice(hostport.indexOf(":") + 1);
+    if (/^\d+$/.test(port)) return hostport;
+    return `${hostport}:11434`;
+  }
+
+  // Bare IPv6, e.g. "::1"
+  return `[${hostport}]:11434`;
+}
+
+/** Env-var resolution: OLLAMA_HOST when set, otherwise http://localhost:11434. */
+export function getOllamaHost(): string {
+  const host = process.env.OLLAMA_HOST;
+  if (!host || !host.trim()) return DEFAULT_LOCAL_OLLAMA_URL;
+  return normalizeOllamaHost(host);
+}
+
+/**
+ * Local server URL used everywhere.
+ * Priority: saved URL, then OLLAMA_HOST, then http://localhost:11434.
+ */
+export function resolveLocalBaseUrl(saved?: string | null): string {
+  if (saved && saved.trim()) return normalizeOllamaHost(saved);
+  return getOllamaHost();
 }
 
 // ── capability inference (exported for testing) ──
